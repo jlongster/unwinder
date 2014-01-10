@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // -*- mode: js -*-
 
+//Error.stackTraceLimit = 100;
+
 var options = require("commander")
   .version(require("../package.json").version)
   .usage("[options] <file>")
@@ -13,7 +15,7 @@ if (typeof file !== "string") {
   process.exit(-1);
 }
 
-process.stdout.write(require("../main")(
+process.stdout.write('\n__debug_sourceURL="' + file + '";' + require("../main")(
   require("fs").readFileSync(file, "utf-8"),
   options // note: `regenerator` will ignore any unknown options anyway
 ));

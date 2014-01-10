@@ -33,9 +33,9 @@ function regenerator(source, options) {
     regenerator.runtime.dev, "utf-8"
   ) + "\n" : "";
 
-  if (!genFunExp.test(source)) {
-    return runtime + source; // Shortcut: no generators to transform.
-  }
+  // if (!genFunExp.test(source)) {
+  //   return runtime + source; // Shortcut: no generators to transform.
+  // }
 
   var runtimeBody = recast.parse(runtime, {
     sourceFileName: regenerator.runtime.dev
@@ -53,7 +53,8 @@ function regenerator(source, options) {
     // Use the harmony branch of Esprima that installs with regenerator
     // instead of the master branch that recast provides.
     esprima: esprimaHarmony,
-    range: supportBlockBinding
+    range: supportBlockBinding,
+      loc: true
   };
 
   var recastAst = recast.parse(source, recastOptions);
@@ -90,7 +91,7 @@ function regenerator(source, options) {
 regenerator.transform = transform;
 
 regenerator.runtime = {
-  dev: path.join(__dirname, "runtime", "dev.js"),
+  dev: path.join(__dirname, "runtime", "vm.js"),
   min: path.join(__dirname, "runtime", "min.js")
 };
 
