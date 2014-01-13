@@ -1,0 +1,207 @@
+
+body {
+    background-color: #aaaaaa;
+}
+
+html, body, .app {
+    height: 100%;
+}
+
+button {
+    margin-right: 1em;
+}
+
+hidden {
+    display: none;
+}
+
+/* layout */
+
+.app-inner {
+    height: calc(100% - 4.5em);
+}
+
+.footer {
+    height: 4.5em;
+}
+
+.col.left, .col.right {
+    padding-top: 10px;
+    padding-bottom: 10px;
+    height: 100%;
+}
+
+.col.partial {
+    height: 60%;
+}
+
+.toolset {
+    height: 40%;
+}
+
+/* misc */
+
+.col.left {
+    padding-right: 7px;
+}
+
+.col.right {
+    padding-left: 7px;
+}
+
+button.close {
+    position: relative;
+    color: white;
+    opacity: 1;
+    text-shadow: none;
+}
+
+button.close:hover {
+    color: #d0d0d0;
+    opacity: 1;
+    top: 2px;
+    text-shadow: none;
+}
+
+/* editor */
+
+.editor .highlight {
+    background-color: red;
+}
+
+/* display */
+
+.display {
+    white-space: pre;
+    font-family: monaco, monospace;
+    color: white;
+}
+
+.display .inner {
+    height: 100%;
+    background-color: #202020;
+    overflow: auto;
+}
+
+canvas {
+    width: 100%;
+    height: 100%;
+}
+
+/* toolset */
+
+.toolset {
+    position: relative;
+    background-color: #112211;
+    clear: both;
+    padding-top: .75em;
+}
+
+.toolset ul.nav {
+    border: 0;
+    border-bottom: 1px solid white;
+    height: 2.5em;
+    padding-left: 2em;
+}
+
+.tool {
+    height: calc(100% - 2.5em);
+}
+
+.toolset ul.nav li a,
+.toolset ul.nav li a:hover {
+    padding: .5em;
+    margin-right: .5em;
+    background-color: #335533;
+    border: 0;
+    color: #d0d0d0;
+
+    height: calc(2.5em - 1px);
+}
+
+.toolset ul.nav li.active a {
+    background-color: #d0d0d0;
+    border: 1px solid white;
+    border-bottom: 0;
+    color: #1f1f1f;
+    height: 2.5em;
+}
+
+.toolset ul.nav li a:hover {
+    cursor: pointer;
+}
+
+.toolset button.close {
+    float: none;
+    position: absolute;
+    top: 0;
+    right: 0;
+    margin: .5em 1em;
+}
+
+.tool {
+    display: none;
+    background-color: #d0d0d0;
+    padding: 1em;
+    color: #1f1f1f;
+}
+
+.tool.active {
+    display: block;
+}
+
+/* debugger */
+/* console */
+
+.debugger,
+.console.with-debugger {
+    width: 50%;
+    float: left;
+}
+
+.debugger .stack {
+    white-space: pre;
+    font-family: monaco, monospace;
+    overflow: auto;
+    height: 50%;
+}
+
+.console.with-debugger {
+    border-left: 1px solid black;
+    background-color: #f0f0f0;
+}
+
+.console {
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.console .output {
+    white-space: pre;
+    font-family: monaco, monospace;
+    overflow: auto;
+    height: calc(100% - 3em);
+    padding: 1em 0;
+}
+
+.console .input {
+    height: 3em;
+}
+
+.console .input input {
+    width: 100%;
+    margin: .5em 0;
+}
+
+/* footer */
+
+.footer {
+    background-color: #112211;
+    color: white;
+    padding: 1em;
+}
+
+.footer button {
+    background-color: #446644;
+    border: 1px solid #446644;
+}

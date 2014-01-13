@@ -1,0 +1,15 @@
+
+function foo(x) {
+  console.log(Math.floor(Math.random()*255));
+
+  if(x > 0) {
+    bar(x - 1);
+  }
+}
+
+function bar(x) {
+  foo(x);
+}
+
+debugger;
+bar(10);

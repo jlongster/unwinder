@@ -1,0 +1,10 @@
+
+Optimizations:
+
+* Be more aggressive about staying inside the state machine, i.e. use
+  "break" instead of "return" when possible (should be able to use
+  break almost always except for function calls)
+
+* Reduce function call overhead by not creating a new closure for
+  every single function. Coalesce it into just one function (like it
+  normally was)
