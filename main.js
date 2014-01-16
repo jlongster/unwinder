@@ -75,7 +75,8 @@ function regenerator(source, options) {
     }
   }
 
-  recastAst.program = transform(ast);
+  var transformed = transform(ast, options.includeDebug);
+  recastAst.program = transformed.ast;
 
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
@@ -84,7 +85,10 @@ function regenerator(source, options) {
     body.unshift.apply(body, runtimeBody);
   }
 
-  return recast.print(recastAst, recastOptions).code;
+  return {
+    code: recast.print(recastAst, recastOptions).code,
+    debugInfo: transformed.debugInfo
+  };
 }
 
 // To modify an AST directly, call require("regenerator").transform(ast).

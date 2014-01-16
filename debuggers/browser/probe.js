@@ -41,9 +41,9 @@ function locToSyntax(loc) {
 }
 
 function DebugInfo() {
-    this.baseId = 1;
+    this.baseId = 0;
     this.baseIndex = 1;
-    this.machines = {};
+    this.machines = [];
     this.stmts = [];
 }
 
@@ -74,49 +74,38 @@ DebugInfo.prototype.addFinalLocation = function(machineId, loc) {
     this.machines[machineId].finalLoc = loc;
 };
 
-DebugInfo.prototype.addEvalLocation = function(machineId, loc) {
-  this.machines[machineId].evalLoc = loc;
-};
-
-DebugInfo.prototype.getDebugInfo = function() {
+DebugInfo.prototype.getDebugAST = function() {
     return b.expressionStatement(
         b.callExpression(
             b.memberExpression(b.identifier('VM'),
                                b.identifier('setDebugInfo'),
                                false),
-            [b.objectExpression(Object.keys(this.machines).map(function(k) {
-                var machine = this.machines[k];
-
-                return b.property(
-                    'init',
-                    b.literal(k),
-                    b.objectExpression([
-                        b.property(
-                            'init',
-                            b.literal('finalLoc'),
-                            b.literal(machine.finalLoc)
-                        ),
-                        b.property(
-                            'init',
-                            b.literal('evalLoc'),
-                            b.literal(machine.evalLoc)
-                        ),
-                        b.property(
-                            'init',
-                            b.literal('locs'),
-                            b.objectExpression(Object.keys(machine.locs).map(function(k) {
-                                return b.property(
-                                    'init',
-                                    b.literal(k),
-                                    locToSyntax(machine.locs[k])
-                                );
-                            }))
-                        )
-                    ])
-                );
+            [b.arrayExpression(this.machines.map(function(machine, i) {
+              return b.objectExpression([
+                b.property(
+                  'init',
+                  b.literal('finalLoc'),
+                  b.literal(machine.finalLoc)
+                ),
+                b.property(
+                  'init',
+                  b.literal('locs'),
+                  b.objectExpression(Object.keys(machine.locs).map(function(k) {
+                    return b.property(
+                      'init',
+                      b.literal(k),
+                      locToSyntax(machine.locs[k])
+                    );
+                  }))
+                )
+              ]);
             }.bind(this)))]
         )
     );
+};
+
+DebugInfo.prototype.getDebugInfo = function() {
+  return this.machines;
 };
 
 exports.DebugInfo = DebugInfo;
@@ -209,11 +198,11 @@ Ep.mark = function(loc) {
   return loc;
 };
 
-Ep.markAndReturn = function() {
-    var next = loc();
-    this.emitAssign(this.contextProperty("next"), next);
-    this.emit(b.returnStatement(null), true);
-    this.mark(next);
+Ep.markAndBreak = function() {
+  var next = loc();
+  this.emitAssign(this.contextProperty("next"), next);
+  this.emit(b.breakStatement(null), true);
+  this.mark(next);
 };
 
 Ep.emit = function(node, internal) {
@@ -256,6 +245,31 @@ Ep.assign = function(lhs, rhs, loc) {
 Ep.contextProperty = function(name, loc) {
   var node = b.memberExpression(
     this.contextId,
+    b.identifier(name),
+    false
+  );
+  node.loc = loc;
+  return node;
+};
+
+Ep.declareVar = function(name, init, loc) {
+  return withLoc(b.variableDeclaration(
+    'var',
+    [b.variableDeclarator(b.identifier(name), init)]
+  ), loc);
+};
+
+Ep.getProperty = function(obj, prop, computed, loc) {
+  return withLoc(b.memberExpression(
+    typeof obj === 'string' ? b.identifier(obj) : obj,
+    typeof prop === 'string' ? b.identifier(prop) : prop,
+    !!computed
+  ), loc);
+};
+
+Ep.vmProperty = function(name, loc) {
+  var node = b.memberExpression(
+    b.identifier('VM'),
     b.identifier(name),
     false
   );
@@ -371,14 +385,15 @@ Ep.makeTempVar = function() {
   return this.contextProperty("t" + nextTempId++);
 };
 
-Ep.getContextFunction = function(id, transform) {
-  return b.functionExpression(
-    id || null/*Anonymous*/,
-    [this.contextId],
-    b.blockStatement([transform(this.getDispatchLoop())]),
-    false, // Not a generator anymore!
-    false // Nor an expression.
-  );
+Ep.makeTempId = function() {
+    return b.identifier("$t" + nextTempId++)
+};
+
+Ep.getMachine = function(funcName, varNames, scope) {
+  return {
+    contextId: this.contextId.name,
+    ast: this.getDispatchLoop(funcName, varNames, scope)
+  };
 };
 
 Ep.resolveEmptyJumps = function() {
@@ -421,7 +436,7 @@ Ep.resolveEmptyJumps = function() {
 //
 // Each marked location in this.listing will correspond to one generated
 // case statement.
-Ep.getDispatchLoop = function() {
+Ep.getDispatchLoop = function(funcName, varNames, scope) {
   var self = this;
   var cases = [];
   var current;
@@ -465,30 +480,172 @@ Ep.getDispatchLoop = function() {
   );
 
   // add an "eval" location
-  this.debugInfo.addEvalLocation(this.debugId, this.finalLoc.value + 1);
   cases.push(
-    b.switchCase(b.literal(this.finalLoc.value + 1), [
-      b.returnStatement(
+    b.switchCase(b.literal(-1), [
+      self.assign(
+        self.contextProperty('rval'),
         b.callExpression(
           b.identifier('eval'),
-          [b.memberExpression(b.identifier('arguments'), b.literal(1), true)]
+          [self.vmProperty('evalArg')]
         )
       )
     ])
   );
 
-  return b.doWhileStatement(
-    b.switchStatement(this.contextProperty("next"), cases),
-    b.binaryExpression('===', this.contextProperty("state"), b.literal('executing'))
-  );
+  // restoring a frame
+  var restoration = varNames.map(function(v) {
+    return b.expressionStatement(
+      b.assignmentExpression(
+        '=',
+        b.identifier(v),
+        self.getProperty(
+          self.getProperty(self.contextProperty('frame'), 'scope'), v
+        )
+      )
+    );
+  }).concat([
+    self.declareVar('$child', self.getProperty(self.contextProperty('frame'), 'child')),
+    b.ifStatement(
+      b.identifier('$child'),
+      b.blockStatement([
+        self.declareVar('$child$ctx', self.getProperty('$child', 'ctx')),
+        self.assign(self.getProperty(self.getProperty('$child', 'fn'), '$ctx'),
+                    b.identifier('$child$ctx')),
+        b.expressionStatement(
+          b.callExpression(
+            self.getProperty(self.getProperty('$child', 'fn'), 'call'),
+            [self.getProperty('$child', 'thisPtr')]
+          )
+        ),
+
+        b.ifStatement(
+          self.getProperty('$child$ctx', 'frame'),
+          b.blockStatement([
+            self.assign(self.getProperty(self.contextProperty('frame'), 'child'),
+                        self.getProperty('$child$ctx', 'frame')),
+            b.returnStatement(null)
+          ]),
+          b.blockStatement([
+            self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
+            self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null)),
+            self.assign(self.getProperty('$ctx',
+                                         self.contextProperty('resultLoc'),
+                                         true),
+                        self.getProperty('$child$ctx', 'rval')),
+            // if we are stepping, stop executing here so that it
+            // pauses on the "return" instruction
+            b.ifStatement(self.vmProperty('stepping'),
+                          b.throwStatement(b.literal(null)))
+          ])
+        )
+      ]),
+      b.blockStatement([
+        b.ifStatement(
+          self.contextProperty('staticBreakpoint'),
+          self.assign(
+            self.getProperty('$ctx', 'next'),
+            b.binaryExpression('+', self.getProperty('$ctx', 'next'), b.literal(3))
+          )
+        ),
+        self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
+        self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null))
+      ])
+    )
+  ]);
+
+  return [
+    // the state machine, wrapped in a try/catch
+    b.tryStatement(
+      b.blockStatement([
+        b.ifStatement(
+          self.contextProperty('frame'),
+          b.blockStatement(restoration),
+          b.ifStatement(
+            // if we are stepping, stop executing so it is stopped at
+            // the first instruction of the new frame
+            self.vmProperty('stepping'),
+            b.throwStatement(b.literal(null))
+          )
+        ),
+
+        b.whileStatement(
+          b.literal(1),
+          b.blockStatement([
+            b.ifStatement(
+              b.logicalExpression(
+                '&&',
+                self.vmProperty('hasBreakpoints'),
+                b.binaryExpression(
+                  '!==',
+                  self.getProperty(
+                    self.getProperty(self.vmProperty('machineBreaks'),
+                                     b.literal(this.debugId),
+                                     true),
+                    self.contextProperty('next'),
+                    true
+                  ),
+                  // is identifier right here? it doesn't seem right
+                  b.identifier('undefined')
+                )
+              ),
+              b.breakStatement()
+            ),
+
+            b.switchStatement(self.contextProperty('next'), cases),
+
+            b.ifStatement(
+              self.vmProperty('stepping'),
+              b.breakStatement()
+            )
+          ])
+        )
+      ]),
+      b.catchClause(b.identifier('e'), null, b.blockStatement([
+        b.expressionStatement(
+          b.assignmentExpression(
+            '=',
+            b.memberExpression(b.identifier('VM'), b.identifier('error'), false),
+            b.identifier('e')
+          )
+        )
+      ]))
+    ),
+
+    // if it falls out of the loops, that means we've paused so create
+    // a frame
+    b.expressionStatement(
+      b.assignmentExpression(
+        '=',
+        self.contextProperty('frame'),
+        b.newExpression(
+          self.vmProperty('Frame'),
+          [b.literal(this.debugId),
+           b.literal(funcName),
+           b.identifier(funcName),
+           b.objectExpression(
+             varNames.map(function(name) {
+               return b.property(
+                 'init',
+                 b.literal(name),
+                 b.identifier(name)
+               );
+             })
+           ),
+           b.arrayExpression(scope.map(function(v) { return b.literal(v); })),
+           b.thisExpression(),
+           b.identifier('$ctx'),
+           self.contextProperty('childFrame')]
+        )
+      )
+    )];
 };
 
 // See comment above re: alreadyEnded.
 function isSwitchCaseEnder(stmt) {
   return n.BreakStatement.check(stmt)
-      || n.ContinueStatement.check(stmt)
-      || n.ReturnStatement.check(stmt)
-      || n.ThrowStatement.check(stmt);
+    || n.ContinueStatement.check(stmt)
+    || n.ReturnStatement.check(stmt)
+    || n.ThrowStatement.check(stmt);
 }
 
 // All side effects must be realized in order.
@@ -525,8 +682,8 @@ Ep.explode = function(path, ignoreResult) {
   case "VariableDeclarator":
     throw getDeclError(node);
 
-  // These node types should be handled by their parent nodes
-  // (ObjectExpression, SwitchStatement, and TryStatement, respectively).
+    // These node types should be handled by their parent nodes
+    // (ObjectExpression, SwitchStatement, and TryStatement, respectively).
   case "Property":
   case "SwitchCase":
   case "CatchClause":
@@ -543,8 +700,8 @@ Ep.explode = function(path, ignoreResult) {
 function getDeclError(node) {
   return new Error(
     "all declarations should have been transformed into " +
-    "assignments before the Exploder began its work: " +
-    JSON.stringify(node));
+      "assignments before the Exploder began its work: " +
+      JSON.stringify(node));
 }
 
 Ep.explodeStatement = function(path, labelId) {
@@ -598,7 +755,7 @@ Ep.explodeStatement = function(path, labelId) {
                    after,
                    path.get("test").node.loc);
 
-    self.markAndReturn();
+    self.markAndBreak();
 
     self.leapManager.withEntry(
       new leap.LoopEntry(after, before, labelId),
@@ -623,6 +780,8 @@ Ep.explodeStatement = function(path, labelId) {
     self.jumpIf(self.explodeExpression(path.get("test")),
                 first,
                 path.get("test").node.loc);
+    self.emitAssign(self.contextProperty('next'), after);
+    self.emit(b.breakStatement(), true);
     self.mark(after);
 
     break;
@@ -648,7 +807,7 @@ Ep.explodeStatement = function(path, labelId) {
       // No test means continue unconditionally.
     }
 
-    this.markAndReturn();
+    this.markAndBreak();
 
     self.leapManager.withEntry(
       new leap.LoopEntry(after, update, labelId),
@@ -717,7 +876,7 @@ Ep.explodeStatement = function(path, labelId) {
       stmt.left.loc
     );
 
-    self.markAndReturn();
+    self.markAndBreak();
 
     self.leapManager.withEntry(
       new leap.LoopEntry(after, head, labelId),
@@ -808,7 +967,7 @@ Ep.explodeStatement = function(path, labelId) {
       path.get("test").node.loc
     );
 
-    self.markAndReturn();
+    self.markAndBreak();
 
     self.explodeStatement(path.get("consequent"));
 
@@ -939,9 +1098,11 @@ Ep.explodeStatement = function(path, labelId) {
 
   case "DebuggerStatement":
     var after = loc();
-    self.emitAssign(self.contextProperty("next"), after, path.node.loc);
-    self.emitAssign(self.contextProperty("state"), b.literal('suspended'));
-    self.emit(b.returnStatement(null), true);
+    self.emitAssign(self.vmProperty('stepping'),
+                    b.literal(true),
+                    path.node.loc);
+    self.emitAssign(self.contextProperty('next'), after);
+    self.emit(b.breakStatement(), true);
     self.mark(after);
 
     break;
@@ -1038,7 +1199,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
       var after = loc();
       self.emit(expr);
       self.emitAssign(self.contextProperty("next"), after, expr.loc);
-      self.emit(b.returnStatement(null), true);
+      self.emit(b.breakStatement(), true);
       self.mark(after);
     } else {
       return expr;
@@ -1099,7 +1260,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
         childPath.node.loc
       );
 
-      self.markAndReturn();
+      self.markAndBreak();
     }
     return result;
   }
@@ -1122,35 +1283,86 @@ Ep.explodeExpression = function(path, ignoreResult) {
     var oldCalleePath = path.get("callee");
     var newCallee = self.explodeExpression(oldCalleePath);
 
-    // If the callee was not previously a MemberExpression, then the
-    // CallExpression was "unqualified," meaning its `this` object should
-    // be the global object. If the exploded expression has become a
-    // MemberExpression, then we need to force it to be unqualified by
-    // using the (0, object.property)(...) trick; otherwise, it will
-    // receive the object of the MemberExpression as its `this` object.
-    if (!n.MemberExpression.check(oldCalleePath.node) &&
-        n.MemberExpression.check(newCallee)) {
-      newCallee = b.sequenceExpression([
-        b.literal(0),
-        newCallee
-      ]);
-    }
-
     var after = loc();
-    self.emitAssign(
-      self.contextProperty("invoke"),
-       b.callExpression(
-        newCallee,
-        path.get("arguments").map(function(argPath) {
-          return explodeViaTempVar(null, argPath);
-        })
-      ),
-      path.node.loc
+    var tmp = self.makeTempVar();
+    //var prevContext = self.makeTempId();
+    var curContext = self.getProperty(newCallee, '$ctx');
+    var curContextTmp = self.makeTempId();
+    var args = path.get("arguments").map(function(argPath) {
+      return explodeViaTempVar(null, argPath);
+    });
+
+    self.emit(
+      withLoc(self.declareVar(
+        curContextTmp.name, 
+        b.callExpression(self.getProperty('VM', 'getContext'), [])
+      ), path.node.loc)
     );
+
+    self.emit(
+      b.ifStatement(
+        newCallee,
+        self.assign(curContext, curContextTmp)
+      ),
+      true
+    );
+
+    self.emit(b.callExpression(
+      self.getProperty(curContextTmp, 'softReset'),
+      []
+    ), true);
+
+    var res = self.makeTempId();
+    
+    self.emit(self.declareVar(res.name, b.callExpression(newCallee, args)),
+              true);
     self.emitAssign(self.contextProperty("next"), after);
-    self.emit(b.returnStatement(null), true);
+
+    self.emit(
+      b.ifStatement(
+        self.getProperty(curContextTmp, 'frame'),
+        b.blockStatement([
+          b.expressionStatement(
+            b.assignmentExpression(
+              '=',
+              self.contextProperty('childFrame'),
+              self.getProperty(curContextTmp, 'frame')
+            )
+          ),
+          b.expressionStatement(
+            b.assignmentExpression(
+              '=',
+              self.contextProperty('resultLoc'),
+              b.literal(tmp.property.name)
+            )
+          ),
+          b.expressionStatement(
+            b.assignmentExpression('=',
+                                   self.vmProperty('stepping'),
+                                   b.literal(true))
+          ),
+          b.breakStatement()
+        ])
+      ),
+      true
+    );
+
+    self.emitAssign(
+      tmp,
+      b.conditionalExpression(
+        self.getProperty(curContextTmp, 'isCompiled'),
+        self.getProperty(curContextTmp, 'rval'),
+        res
+      )
+    );
+
+    // self.emitAssign(curContext, prevContext);
+    self.emit(b.callExpression(self.getProperty('VM', 'releaseContext') ,[]),
+              true);
+
+    self.emit(b.breakStatement(), true);
     self.mark(after);
-    return self.contextProperty('returned');
+    return tmp;
 
   case "NewExpression":
     // TODO: this should be the last major expression type I need to
@@ -1295,8 +1507,8 @@ Ep.explodeExpression = function(path, ignoreResult) {
   case "ThisExpression":
   case "Identifier":
   case "Literal":
-      return finish(expr);
-      break;
+    return finish(expr);
+    break;
 
   default:
     throw new Error(
@@ -1911,134 +2123,148 @@ var hoist = require("./hoist").hoist;
 var Emitter = require("./emit").Emitter;
 var DebugInfo = require("./debug").DebugInfo;
 
-exports.transform = function(ast) {
-    n.Program.assert(ast);
+exports.transform = function(ast, withDebugInfo) {
+  n.Program.assert(ast);
 
-    var debugInfo = new DebugInfo();
-    var rootFn = types.traverse(
-        b.functionExpression(
-            null, [],
-            b.blockStatement(ast.body)
-        ),
-        function(node) {
-            return visitNode(node, debugInfo);
-        }
-    );
+  var debugInfo = new DebugInfo();
+  var rootFn = types.traverse(
+    b.functionExpression(
+      null, [],
+      b.blockStatement(ast.body)
+    ),
+    function(node) {
+      return visitNode(node, [], debugInfo);
+    }
+  );
 
-    //rootFn.body.body.unshift(b.expressionStatement(b.literal(5)));
+  var body = withDebugInfo ? [debugInfo.getDebugAST()] : [];
+  ast.body = body.concat([
+    b.expressionStatement(
+      b.callExpression(
+        b.memberExpression(b.identifier('VM'), b.identifier('invokeRoot'), false),
+        [rootFn, b.identifier('this')]
+      )
+    )]);
 
-    ast.body = [debugInfo.getDebugInfo(),
-                b.expressionStatement(
-                    b.callExpression(
-                        b.identifier('invokeRoot'), [rootFn, b.identifier('this')]
-                    )
-                )];
-
-    return ast;
+  return {
+    ast: ast,
+    debugInfo: debugInfo.getDebugInfo()
+  };
 };
 
-function visitNode(node, debugInfo) {
-    if (!n.Function.check(node)) {
-        // Note that because we are not returning false here the traversal
-        // will continue into the subtree rooted at this node, as desired.
-        return;
-    }
+var id = 1;
+function newFunctionName() {
+  return b.identifier('$anon' + id++);
+}
 
-    var debugId = debugInfo.makeId();
-    node.generator = false;
+function visitNode(node, scope, debugInfo) {
+  if (!n.Function.check(node)) {
+    // Note that because we are not returning false here the traversal
+    // will continue into the subtree rooted at this node, as desired.
+    return;
+  }
 
-    if (node.expression) {
-        // Transform expression lambdas into normal functions.
-        node.expression = false;
-        node.body = b.blockStatement([
-            b.returnStatement(node.body)
-        ]);
-    }
+  var debugId = debugInfo.makeId();
+  node.generator = false;
 
-    // TODO Ensure these identifiers are named uniquely.
-    var contextId = b.identifier("$ctx");
-    var nameId = node.id;
-    var functionId = node.id ? b.identifier(node.id.name + "$") : null/*Anonymous*/;
-    var argsId = b.identifier("$args");
-    var thisId = b.identifier("$this");
-    var invokeFunctionId = b.identifier("invokeFunction");
-    var shouldAliasArguments = renameIdentifier(node, 'arguments', argsId);
-    var shouldAliasThis = renameIdentifier(node, 'this', thisId);
-    var vars = hoist(node);
+  if (node.expression) {
+    // Transform expression lambdas into normal functions.
+    node.expression = false;
+    node.body = b.blockStatement([
+      b.returnStatement(node.body)
+    ]);
+  }
 
-    if(shouldAliasArguments) {
-        vars = vars || b.variableDeclaration("var", []);
-        vars.declarations.push(b.variableDeclarator(
-            argsId, b.identifier("arguments")
-        ));
-    }
+  // TODO: Ensure these identifiers are named uniquely.
+  var contextId = b.identifier("$ctx");
+  var nameId = node.id;
+  node.id = node.id || newFunctionName();
+  var vars = hoist(node);
+  var argNames = node.params.map(function(v) { return v.name; });
+  var varNames = !vars ? argNames : argNames.concat(
+    vars.declarations.map(function(v) {
+      return v.id.name;
+    })
+  );
 
-    if(shouldAliasThis) {
-        vars = vars || b.variableDeclaration("var", []);
-        vars.declarations.push(b.variableDeclarator(
-            thisId, b.identifier("this")
-        ));
-    }
+  var emitter = new Emitter(contextId, debugId, debugInfo);
+  var path = new types.NodePath(node);
 
-    var emitter = new Emitter(contextId, debugId, debugInfo);
-    var path = new types.NodePath(node);
+  emitter.explode(path.get("body"));
 
-    emitter.explode(path.get("body"));
+  var machine = emitter.getMachine(node.id.name, varNames, scope);
 
-    var outerBody = [];
+  var inner = vars ? [vars] : [];
+  inner.push.apply(inner, [
+    b.variableDeclaration('var', [
+      b.variableDeclarator(
+        b.identifier(machine.contextId),
+        b.memberExpression(node.id, b.identifier('$ctx'), false)
+      )
+    ]),
+    b.ifStatement(
+      b.binaryExpression('===',
+                         b.identifier('$ctx'),
+                         b.identifier('undefined')), // is "identifier" right?
+      b.returnStatement(
+        b.callExpression(
+          b.memberExpression(b.identifier('VM'),
+                             b.identifier('invokeRoot'),
+                             false),
+          [node.id]
+        )
+      )
+    ),
+    b.expressionStatement(
+      b.assignmentExpression(
+        '=',
+        b.memberExpression(b.identifier('$ctx'), b.identifier('isCompiled'),
+                           false),
+        b.literal(true)
+      )
+    )
+  ]);
 
-    if (vars && vars.declarations.length > 0) {
-        outerBody.push(vars);
-    }
-
-    outerBody.push(b.returnStatement(
-        b.callExpression(invokeFunctionId, [
-            b.literal(nameId ? nameId.name : '<anon>'),
-            b.literal(debugId),
-            emitter.getContextFunction(functionId, function(ast) {
-              return types.traverse(ast, function(node) {
-                  return visitNode(node, debugInfo);
-              });
-            }),
-            b.thisExpression()
-        ])
-    ));
-
-    node.body = b.blockStatement(outerBody);
-
-    return false;
+  node.body = b.blockStatement(inner.concat(
+    types.traverse(machine.ast, function(node) {
+      return visitNode(node,
+                       varNames.concat(scope),
+                       debugInfo);
+    })
+  ));
+  return false;
 }
 
 function renameIdentifier(func, id, newId) {
-    var didReplace = false;
-    var hasImplicit = false;
+  var didReplace = false;
+  var hasImplicit = false;
 
-    types.traverse(func, function(node) {
-        if (node === func) {
-            hasImplicit = !this.scope.lookup(id);
-        } else if (n.Function.check(node)) {
-            return false;
-        }
+  types.traverse(func, function(node) {
+    if (node === func) {
+      hasImplicit = !this.scope.lookup(id);
+    } else if (n.Function.check(node)) {
+      return false;
+    }
 
-        if ((n.Identifier.check(node) && node.name === id) ||
-            (n.ThisExpression.check(node) && id === 'this')) {
-            var isMemberProperty =
-                n.MemberExpression.check(this.parent.node) &&
-                this.name === "property" &&
-                !this.parent.node.computed;
+    if ((n.Identifier.check(node) && node.name === id) ||
+        (n.ThisExpression.check(node) && id === 'this')) {
+      var isMemberProperty =
+        n.MemberExpression.check(this.parent.node) &&
+        this.name === "property" &&
+        !this.parent.node.computed;
 
-            if (!isMemberProperty) {
-                this.replace(newId);
-                didReplace = true;
-                return false;
-            }
-        }
-    });
+      if (!isMemberProperty) {
+        this.replace(newId);
+        didReplace = true;
+        return false;
+      }
+    }
+  });
 
-    // If the traversal replaced any arguments identifiers, and those
-    // identifiers were free variables, then we need to alias the outer
-    // function's arguments object to the variable named by newId.
-    return didReplace && hasImplicit;
+  // If the traversal replaced any arguments identifiers, and those
+  // identifiers were free variables, then we need to alias the outer
+  // function's arguments object to the variable named by newId.
+  return didReplace && hasImplicit;
 }
 
 },{"./debug":1,"./emit":2,"./hoist":3,"assert":63,"ast-types":19}],8:[function(require,module,exports){
@@ -2119,7 +2345,8 @@ function regenerator(source, options) {
     }
   }
 
-  recastAst.program = transform(ast);
+  var transformed = transform(ast, options.includeDebug);
+  recastAst.program = transformed.ast;
 
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
@@ -2128,7 +2355,10 @@ function regenerator(source, options) {
     body.unshift.apply(body, runtimeBody);
   }
 
-  return recast.print(recastAst, recastOptions).code;
+  return {
+    code: recast.print(recastAst, recastOptions).code,
+    debugInfo: transformed.debugInfo
+  };
 }
 
 // To modify an AST directly, call require("regenerator").transform(ast).
@@ -2893,33 +3123,65 @@ var Scope = require("./scope");
 function NodePath(value, parentPath, name) {
     assert.ok(this instanceof NodePath);
     Path.call(this, value, parentPath, name);
+}
 
-    // Conservatively update parameters to reflect any alterations made by
-    // the Path constructor.
-    value = this.value;
-    parentPath = this.parentPath;
-    name = this.name;
+require("util").inherits(NodePath, Path);
+var NPp = NodePath.prototype;
 
-    var node = null;
-    var pp = parentPath;
-    var scope = pp && pp.scope;
+Object.defineProperties(NPp, {
+    node: {
+        get: function() {
+            Object.defineProperty(this, "node", {
+                value: this._computeNode()
+            });
 
-    if (n.Node.check(value)) {
-        node = value;
-
-        if (Scope.isEstablishedBy(node)) {
-            scope = new Scope(this, scope);
+            return this.node;
         }
+    },
 
-    } else {
+    parent: {
+        get: function() {
+            Object.defineProperty(this, "parent", {
+                value: this._computeParent()
+            });
+
+            return this.parent;
+        }
+    },
+
+    scope: {
+        get: function() {
+            Object.defineProperty(this, "scope", {
+                value: this._computeScope()
+            });
+
+            return this.scope;
+        }
+    }
+});
+
+// The value of the first ancestor Path whose value is a Node.
+NPp._computeNode = function() {
+    var value = this.value;
+    if (n.Node.check(value)) {
+        return value;
+    }
+
+    var pp = this.parentPath;
+    return pp && pp.node || null;
+};
+
+// The first ancestor Path whose value is a Node distinct from this.node.
+NPp._computeParent = function() {
+    var value = this.value;
+    var pp = this.parentPath;
+
+    if (!n.Node.check(value)) {
         while (pp && !n.Node.check(pp.value)) {
-            assert.strictEqual(pp.scope, scope);
             pp = pp.parentPath;
         }
 
         if (pp) {
-            assert.strictEqual(pp.scope, scope);
-            node = pp.value || null;
             pp = pp.parentPath;
         }
     }
@@ -2928,26 +3190,22 @@ function NodePath(value, parentPath, name) {
         pp = pp.parentPath;
     }
 
-    if (pp && node) {
-        assert.notStrictEqual(pp.value, node);
-        assert.notStrictEqual(pp.node, node);
+    return pp || null;
+};
+
+// The closest enclosing scope that governs this node.
+NPp._computeScope = function() {
+    var value = this.value;
+    var pp = this.parentPath;
+    var scope = pp && pp.scope;
+
+    if (n.Node.check(value) &&
+        Scope.isEstablishedBy(value)) {
+        scope = new Scope(this, scope);
     }
 
-    Object.defineProperties(this, {
-        // The value of the first ancestor Path whose value is a Node.
-        node: { value: node || null },
-
-        // The first ancestor Path whose value is a Node distinct from
-        // this.node.
-        parent: { value: pp || null },
-
-        // The closest enclosing scope that governs this node.
-        scope: { value: scope || null }
-    });
-}
-
-require("util").inherits(NodePath, Path);
-var NPp = NodePath.prototype;
+    return scope || null;
+};
 
 NPp.getValueProperty = function(name) {
     return types.getFieldValue(this.value, name);
@@ -3019,6 +3277,15 @@ NPp.needsParens = function() {
             || n.ArrayExpression.check(parent)
             || n.Property.check(parent)
             || n.ConditionalExpression.check(parent);
+
+    if (n.YieldExpression.check(node))
+        return isBinary(parent)
+            || n.CallExpression.check(parent)
+            || n.MemberExpression.check(parent)
+            || n.NewExpression.check(parent)
+            || n.ConditionalExpression.check(parent)
+            || n.UnaryExpression.check(parent)
+            || n.YieldExpression.check(parent);
 
     if (n.NewExpression.check(parent) &&
         this.name === "callee") {
@@ -3244,7 +3511,12 @@ var Sp = Scope.prototype;
 Sp.didScan = false;
 
 Sp.declares = function(name) {
-    if (!this.didScan) {
+    this.scan();
+    return hasOwn.call(this.bindings, name);
+};
+
+Sp.scan = function(force) {
+    if (force || !this.didScan) {
         for (var name in this.bindings) {
             // Empty out this.bindings, just in cases.
             delete this.bindings[name];
@@ -3252,8 +3524,11 @@ Sp.declares = function(name) {
         scanScope(this.path, this.bindings);
         this.didScan = true;
     }
+};
 
-    return hasOwn.call(this.bindings, name);
+Sp.getBindings = function () {
+    this.scan();
+    return this.bindings;
 };
 
 function scanScope(path, bindings) {
@@ -3417,44 +3692,61 @@ exports.isPrimitive = new Type(function(value) {
 var assert = require("assert");
 var types = require("./types");
 var Node = types.namedTypes.Node;
+var isObject = types.builtInTypes.object;
 var isArray = types.builtInTypes.array;
 var NodePath = require("./node-path");
+var funToStr = Function.prototype.toString;
+var thisPattern = /\bthis\b/;
 
 // Good for traversals that need to modify the syntax tree or to access
 // path/scope information via `this` (a NodePath object). Somewhat slower
 // than traverseWithNoPathInfo because of the NodePath bookkeeping.
 function traverseWithFullPathInfo(node, callback) {
+    if (!thisPattern.test(funToStr.call(callback))) {
+        // If the callback function contains no references to `this`, then
+        // it will have no way of using any of the NodePath information
+        // that traverseWithFullPathInfo provides, so we can skip that
+        // bookkeeping altogether.
+        return traverseWithNoPathInfo(node, callback);
+    }
+
     function traverse(path) {
         assert.ok(path instanceof NodePath);
+        var value = path.value;
 
-        if (isArray.check(path.value)) {
+        if (isArray.check(value)) {
             path.each(traverse);
+            return;
+        }
 
-        } else if (Node.check(path.value)) {
-            var node = path.value;
-
-            if (callback.call(path, node, traverse) === false) {
+        if (Node.check(value)) {
+            if (callback.call(path, value, traverse) === false) {
                 return;
             }
-
-            types.eachField(node, function(name, child) {
-                var childPath = path.get(name);
-                assert.strictEqual(childPath.value, child);
-                traverse(childPath);
-            });
+        } else if (!isObject.check(value)) {
+            return;
         }
+
+        types.eachField(value, function(name, child) {
+            var childPath = path.get(name);
+            if (childPath.value !== child) {
+                childPath.replace(child);
+            }
+
+            traverse(childPath);
+        });
     }
 
     if (node instanceof NodePath) {
         traverse(node);
         return node.value;
-    } else {
-        // Just in case we call this.replace at the root, there needs to
-        // be an additional parent Path to update.
-        var rootPath = new NodePath({ root: node });
-        traverse(rootPath.get("root"));
-        return rootPath.value.root;
     }
+
+    // Just in case we call this.replace at the root, there needs to be an
+    // additional parent Path to update.
+    var rootPath = new NodePath({ root: node });
+    traverse(rootPath.get("root"));
+    return rootPath.value.root;
 }
 
 // Good for read-only traversals that do not require any NodePath
@@ -3467,19 +3759,25 @@ function traverseWithNoPathInfo(node, callback, context) {
     function traverse(node) {
         if (isArray.check(node)) {
             node.forEach(traverse);
+            return;
+        }
 
-        } else if (Node.check(node)) {
+        if (Node.check(node)) {
             if (callback.call(context, node, traverse) === false) {
                 return;
             }
-
-            types.eachField(node, function(name, child) {
-                traverse(child);
-            });
+        } else if (!isObject.check(node)) {
+            return;
         }
+
+        types.eachField(node, function(name, child) {
+            traverse(child);
+        });
     }
 
     traverse(node);
+
+    return node;
 }
 
 // Since we export traverseWithFullPathInfo as module.exports, we need to
@@ -10620,15 +10918,15 @@ parseYieldExpression: true
     TokenName[Token.RegularExpression] = 'RegularExpression';
 
     // A function following one of those tokens is an expression.
-    FnExprTokens = ["(", "{", "[", "in", "typeof", "instanceof", "new",
-                    "return", "case", "delete", "throw", "void",
+    FnExprTokens = ['(', '{', '[', 'in', 'typeof', 'instanceof', 'new',
+                    'return', 'case', 'delete', 'throw', 'void',
                     // assignment operators
-                    "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", ">>>=",
-                    "&=", "|=", "^=", ",",
+                    '=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '>>>=',
+                    '&=', '|=', '^=', ',',
                     // binary/unary operators
-                    "+", "-", "*", "/", "%", "++", "--", "<<", ">>", ">>>", "&",
-                    "|", "^", "!", "~", "&&", "||", "?", ":", "===", "==", ">=",
-                    "<=", "<", ">", "!=", "!=="];
+                    '+', '-', '*', '/', '%', '++', '--', '<<', '>>', '>>>', '&',
+                    '|', '^', '!', '~', '&&', '||', '?', ':', '===', '==', '>=',
+                    '<=', '<', '>', '!=', '!=='];
 
     Syntax = {
         ArrayExpression: 'ArrayExpression',
@@ -11872,31 +12170,31 @@ parseYieldExpression: true
             // Nothing before that: it cannot be a division.
             return scanRegExp();
         }
-        if (prevToken.type === "Punctuator") {
-            if (prevToken.value === ")") {
+        if (prevToken.type === 'Punctuator') {
+            if (prevToken.value === ')') {
                 checkToken = extra.tokens[extra.openParenToken - 1];
                 if (checkToken &&
-                        checkToken.type === "Keyword" &&
-                        (checkToken.value === "if" ||
-                         checkToken.value === "while" ||
-                         checkToken.value === "for" ||
-                         checkToken.value === "with")) {
+                        checkToken.type === 'Keyword' &&
+                        (checkToken.value === 'if' ||
+                         checkToken.value === 'while' ||
+                         checkToken.value === 'for' ||
+                         checkToken.value === 'with')) {
                     return scanRegExp();
                 }
                 return scanPunctuator();
             }
-            if (prevToken.value === "}") {
+            if (prevToken.value === '}') {
                 // Dividing a function by anything makes little sense,
                 // but we have to check for that.
                 if (extra.tokens[extra.openCurlyToken - 3] &&
-                        extra.tokens[extra.openCurlyToken - 3].type === "Keyword") {
+                        extra.tokens[extra.openCurlyToken - 3].type === 'Keyword') {
                     // Anonymous function.
                     checkToken = extra.tokens[extra.openCurlyToken - 4];
                     if (!checkToken) {
                         return scanPunctuator();
                     }
                 } else if (extra.tokens[extra.openCurlyToken - 4] &&
-                        extra.tokens[extra.openCurlyToken - 4].type === "Keyword") {
+                        extra.tokens[extra.openCurlyToken - 4].type === 'Keyword') {
                     // Named function.
                     checkToken = extra.tokens[extra.openCurlyToken - 5];
                     if (!checkToken) {
@@ -11916,7 +12214,7 @@ parseYieldExpression: true
             }
             return scanRegExp();
         }
-        if (prevToken.type === "Keyword") {
+        if (prevToken.type === 'Keyword') {
             return scanRegExp();
         }
         return scanPunctuator();
@@ -12165,7 +12463,7 @@ parseYieldExpression: true
                 type: Syntax.ForOfStatement,
                 left: left,
                 right: right,
-                body: body,
+                body: body
             };
         },
 
@@ -12724,7 +13022,7 @@ parseYieldExpression: true
                     throwError({}, Messages.ComprehensionError);
                 }
                 matchKeyword('for');
-                tmp = parseForStatement({ignore_body: true});
+                tmp = parseForStatement({ignoreBody: true});
                 tmp.of = tmp.type === Syntax.ForOfStatement;
                 tmp.type = Syntax.ComprehensionBlock;
                 if (tmp.left.kind) { // can't be let or const
@@ -12985,13 +13283,9 @@ parseYieldExpression: true
 
         ++state.parenthesizedCount;
 
-        state.allowArrowFunction = !state.allowArrowFunction;
         expr = parseExpression();
-        state.allowArrowFunction = false;
 
-        if (expr.type !== Syntax.ArrowFunctionExpression) {
-            expect(')');
-        }
+        expect(')');
 
         return expr;
     }
@@ -13494,7 +13788,7 @@ parseYieldExpression: true
                 params.push(param);
                 defaults.push(null);
             } else if (param.type === Syntax.SpreadElement) {
-                assert(i === len - 1, "It is guaranteed that SpreadElement is last element by parseExpression");
+                assert(i === len - 1, 'It is guaranteed that SpreadElement is last element by parseExpression');
                 reinterpretAsDestructuredParameter(options, param.argument);
                 rest = param.argument;
             } else if (param.type === Syntax.AssignmentExpression) {
@@ -13574,13 +13868,15 @@ parseYieldExpression: true
         token = lookahead;
         expr = parseConditionalExpression();
 
-        if (match('=>') && expr.type === Syntax.Identifier) {
-            if (state.parenthesizedCount === oldParenthesizedCount || state.parenthesizedCount === (oldParenthesizedCount + 1)) {
-                params = { params: [ expr ], defaults: [], rest: null };
-                if (isRestrictedWord(expr.name)) {
-                    params.firstRestricted = expr;
-                    params.message = Messages.StrictParamName;
-                }
+        if (match('=>') &&
+                (state.parenthesizedCount === oldParenthesizedCount ||
+                state.parenthesizedCount === (oldParenthesizedCount + 1))) {
+            if (expr.type === Syntax.Identifier) {
+                params = reinterpretAsCoverFormalsList([ expr ]);
+            } else if (expr.type === Syntax.SequenceExpression) {
+                params = reinterpretAsCoverFormalsList(expr.expressions);
+            }
+            if (params) {
                 return parseArrowFunctionExpression(params);
             }
         }
@@ -13607,7 +13903,9 @@ parseYieldExpression: true
     // 11.14 Comma Operator
 
     function parseExpression() {
-        var expr, expressions, sequence, coverFormalsList, spreadFound, token;
+        var expr, expressions, sequence, coverFormalsList, spreadFound, oldParenthesizedCount;
+
+        oldParenthesizedCount = state.parenthesizedCount;
 
         expr = parseAssignmentExpression();
         expressions = [ expr ];
@@ -13634,23 +13932,19 @@ parseYieldExpression: true
             sequence = delegate.createSequenceExpression(expressions);
         }
 
-        if (state.allowArrowFunction && match(')')) {
-            token = lookahead2();
-            if (token.value === '=>') {
-                lex();
-
-                state.allowArrowFunction = false;
-                expr = expressions;
+        if (match('=>')) {
+            // Do not allow nested parentheses on the LHS of the =>.
+            if (state.parenthesizedCount === oldParenthesizedCount || state.parenthesizedCount === (oldParenthesizedCount + 1)) {
+                expr = expr.type === Syntax.SequenceExpression ? expr.expressions : expressions;
                 coverFormalsList = reinterpretAsCoverFormalsList(expr);
                 if (coverFormalsList) {
                     return parseArrowFunctionExpression(coverFormalsList);
                 }
-
-                throwUnexpected(token);
             }
+            throwUnexpected(lex());
         }
 
-        if (spreadFound) {
+        if (spreadFound && lookahead2().value !== '=>') {
             throwError({}, Messages.IllegalSpread);
         }
 
@@ -14031,7 +14325,7 @@ parseYieldExpression: true
         expectKeyword('for');
 
         // http://wiki.ecmascript.org/doku.php?id=proposals:iterators_and_generators&s=each
-        if (matchContextualKeyword("each")) {
+        if (matchContextualKeyword('each')) {
             throwError({}, Messages.EachNotAllowed);
         }
 
@@ -14100,7 +14394,7 @@ parseYieldExpression: true
         oldInIteration = state.inIteration;
         state.inIteration = true;
 
-        if (!(opts !== undefined && opts.ignore_body)) {
+        if (!(opts !== undefined && opts.ignoreBody)) {
             body = parseStatement();
         }
 
@@ -14671,7 +14965,7 @@ parseYieldExpression: true
     }
 
     function parseFunctionDeclaration() {
-        var id, body, token, tmp, firstRestricted, message, previousStrict, previousYieldAllowed, generator, expression;
+        var id, body, token, tmp, firstRestricted, message, previousStrict, previousYieldAllowed, generator;
 
         expectKeyword('function');
 
@@ -14709,9 +15003,7 @@ parseYieldExpression: true
         previousYieldAllowed = state.yieldAllowed;
         state.yieldAllowed = generator;
 
-        // here we redo some work in order to set 'expression'
-        expression = !match('{');
-        body = parseConciseBody();
+        body = parseFunctionSourceElements();
 
         if (strict && firstRestricted) {
             throwError(firstRestricted, message);
@@ -14725,11 +15017,11 @@ parseYieldExpression: true
         strict = previousStrict;
         state.yieldAllowed = previousYieldAllowed;
 
-        return delegate.createFunctionDeclaration(id, tmp.params, tmp.defaults, body, tmp.rest, generator, expression);
+        return delegate.createFunctionDeclaration(id, tmp.params, tmp.defaults, body, tmp.rest, generator, false);
     }
 
     function parseFunctionExpression() {
-        var token, id = null, firstRestricted, message, tmp, body, previousStrict, previousYieldAllowed, generator, expression;
+        var token, id = null, firstRestricted, message, tmp, body, previousStrict, previousYieldAllowed, generator;
 
         expectKeyword('function');
 
@@ -14768,9 +15060,7 @@ parseYieldExpression: true
         previousYieldAllowed = state.yieldAllowed;
         state.yieldAllowed = generator;
 
-        // here we redo some work in order to set 'expression'
-        expression = !match('{');
-        body = parseConciseBody();
+        body = parseFunctionSourceElements();
 
         if (strict && firstRestricted) {
             throwError(firstRestricted, message);
@@ -14784,11 +15074,11 @@ parseYieldExpression: true
         strict = previousStrict;
         state.yieldAllowed = previousYieldAllowed;
 
-        return delegate.createFunctionExpression(id, tmp.params, tmp.defaults, body, tmp.rest, generator, expression);
+        return delegate.createFunctionExpression(id, tmp.params, tmp.defaults, body, tmp.rest, generator, false);
     }
 
     function parseYieldExpression() {
-        var delegateFlag, expr, previousYieldAllowed;
+        var delegateFlag, expr;
 
         expectKeyword('yield');
 
@@ -14802,11 +15092,7 @@ parseYieldExpression: true
             delegateFlag = true;
         }
 
-        // It is a Syntax Error if any AssignmentExpression Contains YieldExpression.
-        previousYieldAllowed = state.yieldAllowed;
-        state.yieldAllowed = false;
         expr = parseAssignmentExpression();
-        state.yieldAllowed = previousYieldAllowed;
         state.yieldFound = true;
 
         return delegate.createYieldExpression(expr, delegateFlag);
@@ -15426,8 +15712,8 @@ parseYieldExpression: true
 
         apply: function (node) {
             var nodeType = typeof node;
-            assert(nodeType === "object",
-                "Applying location marker to an unexpected node type: " +
+            assert(nodeType === 'object',
+                'Applying location marker to an unexpected node type: ' +
                     nodeType);
 
             if (extra.range) {
@@ -15461,19 +15747,11 @@ parseYieldExpression: true
         expect('(');
 
         ++state.parenthesizedCount;
-
-        state.allowArrowFunction = !state.allowArrowFunction;
         expr = parseExpression();
-        state.allowArrowFunction = false;
 
-        if (expr.type === 'ArrowFunctionExpression') {
-            marker.end();
-            marker.apply(expr);
-        } else {
-            expect(')');
-            marker.end();
-            marker.applyGroup(expr);
-        }
+        expect(')');
+        marker.end();
+        marker.applyGroup(expr);
 
         return expr;
     }
@@ -15649,6 +15927,7 @@ parseYieldExpression: true
 
             wrapTracking = wrapTrackingFunction(extra.range, extra.loc);
 
+            extra.parseArrayInitialiser = parseArrayInitialiser;
             extra.parseAssignmentExpression = parseAssignmentExpression;
             extra.parseBinaryExpression = parseBinaryExpression;
             extra.parseBlock = parseBlock;
@@ -15671,6 +15950,7 @@ parseYieldExpression: true
             extra.parseModuleBlock = parseModuleBlock;
             extra.parseNewExpression = parseNewExpression;
             extra.parseNonComputedProperty = parseNonComputedProperty;
+            extra.parseObjectInitialiser = parseObjectInitialiser;
             extra.parseObjectProperty = parseObjectProperty;
             extra.parseObjectPropertyKey = parseObjectPropertyKey;
             extra.parsePostfixExpression = parsePostfixExpression;
@@ -15690,6 +15970,7 @@ parseYieldExpression: true
             extra.parseClassExpression = parseClassExpression;
             extra.parseClassBody = parseClassBody;
 
+            parseArrayInitialiser = wrapTracking(extra.parseArrayInitialiser);
             parseAssignmentExpression = wrapTracking(extra.parseAssignmentExpression);
             parseBinaryExpression = wrapTracking(extra.parseBinaryExpression);
             parseBlock = wrapTracking(extra.parseBlock);
@@ -15713,6 +15994,7 @@ parseYieldExpression: true
             parseLeftHandSideExpression = wrapTracking(parseLeftHandSideExpression);
             parseNewExpression = wrapTracking(extra.parseNewExpression);
             parseNonComputedProperty = wrapTracking(extra.parseNonComputedProperty);
+            parseObjectInitialiser = wrapTracking(extra.parseObjectInitialiser);
             parseObjectProperty = wrapTracking(extra.parseObjectProperty);
             parseObjectPropertyKey = wrapTracking(extra.parseObjectPropertyKey);
             parsePostfixExpression = wrapTracking(extra.parsePostfixExpression);
@@ -15748,6 +16030,7 @@ parseYieldExpression: true
         }
 
         if (extra.range || extra.loc) {
+            parseArrayInitialiser = extra.parseArrayInitialiser;
             parseAssignmentExpression = extra.parseAssignmentExpression;
             parseBinaryExpression = extra.parseBinaryExpression;
             parseBlock = extra.parseBlock;
@@ -15772,6 +16055,7 @@ parseYieldExpression: true
             parseModuleBlock = extra.parseModuleBlock;
             parseNewExpression = extra.parseNewExpression;
             parseNonComputedProperty = extra.parseNonComputedProperty;
+            parseObjectInitialiser = extra.parseObjectInitialiser;
             parseObjectProperty = extra.parseObjectProperty;
             parseObjectPropertyKey = extra.parseObjectPropertyKey;
             parsePostfixExpression = extra.parsePostfixExpression;
@@ -16011,7 +16295,7 @@ parseYieldExpression: true
         return program;
     }
 
-    // Sync with package.json and component.json.
+    // Sync with *.json manifests.
     exports.version = '1.1.0-dev-harmony';
 
     exports.tokenize = tokenize;
@@ -18037,8 +18321,13 @@ function Printer(options) {
     }
 
     this.print = function(ast) {
-        if (!ast) return emptyPrintResult;
-        var lines = print(new NodePath(ast), true);
+        if (!ast) {
+            return emptyPrintResult;
+        }
+
+        var path = ast instanceof NodePath ? ast : new NodePath(ast);
+        var lines = print(path, true);
+
         return new PrintResult(
             lines.toString(options),
             util.composeSourceMaps(
@@ -18052,8 +18341,13 @@ function Printer(options) {
     };
 
     this.printGenerically = function(ast) {
-        if (!ast) return emptyPrintResult;
-        var lines = printGenerically(new NodePath(ast));
+        if (!ast) {
+            return emptyPrintResult;
+        }
+
+        var path = ast instanceof NodePath ? ast : new NodePath(ast);
+        var lines = printGenerically(path);
+
         return new PrintResult(lines.toString(options));
     };
 }
@@ -18604,9 +18898,10 @@ function genericPrintNoParens(path, options, print) {
             print(path.get("block"))
         ];
 
-        n.handlers.forEach(function(handler) {
-            parts.push(" ", print(handler));
-        });
+        parts.push(print(path.get("handler")))
+        // n.handlers.forEach(function(handler) {
+        //     parts.push(" ", print(handler));
+        // });
 
         if (n.finalizer)
             parts.push(" finally ", print(path.get("finalizer")));

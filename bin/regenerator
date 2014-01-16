@@ -7,6 +7,7 @@ var options = require("commander")
   .version(require("../package.json").version)
   .usage("[options] <file>")
   .option("-r, --include-runtime", "Prepend the runtime to the output.")
+  .option("-d, --include-debug", "Prepend debug info to the output.")
   .parse(process.argv);
 
 var file = options.args[0];
@@ -18,4 +19,4 @@ if (typeof file !== "string") {
 process.stdout.write('\n__debug_sourceURL="' + file + '";' + require("../main")(
   require("fs").readFileSync(file, "utf-8"),
   options // note: `regenerator` will ignore any unknown options anyway
-));
+).code);

@@ -5,233 +5,325 @@
 
   var findingRoot = false;
 
-  function invokeRoot(fn, self) {
-    findingRoot = true;
-    rootFrame = curFrame = fn();
-    findingRoot = false;
+  function invokeRoot(fn) {
+    VM.state = EXECUTING;
 
-    rootFrame.run();
+    var ctx = fn.$ctx = getContext();
+    ctx.softReset();
+    fn();
+    checkStatus(ctx);
   }
 
-  function invokeFunction(name, id, fn, self) {
-    var frame = new Frame(name, id, fn, self);
+  function checkStatus(ctx) {
+    if(ctx.frame) {
+      ctx.frame.name = 'top-level';
 
-    if(!rootFrame && !findingRoot) {
-      // no root frame means that it's being called from outside
-      // our control, most likely something async. simply make
-      // this the root frame!! this makes ALL FUNCTIONS
-      // INTEROPERABLE! without having to shim anything. we
-      // could even have hooks for when async is entered/exited
-      // and create neat debugging tools for that.
+      // machine was paused
+      VM.state = VM.SUSPENDED;
+      rootFrame = ctx.frame;
 
-      rootFrame = curFrame = frame;
-      rootFrame.run();
+      if(VM.error) {
+        VM.onError && VM.onError(VM.error);
+        VM.error = null;
+      }
+      else if(VM.isStepping()) {
+        VM.onStep && VM.onStep();
+      }
+      else {
+        VM.onBreakpoint && VM.onBreakpoint();
+      }
+
+      VM.stepping = true;
     }
     else {
-      return frame;
+      if(VM.onFinish) {
+        setTimeout(VM.onFinish, 0);
+      }
+
+      VM.state = VM.IDLE;
     }
   }
 
-  global.invokeFunction = invokeFunction;
-  global.invokeRoot = invokeRoot;
-  var VM = global.VM = {};
+  function getTopFrame(frame) {
+    var top = frame;
+    while(top.child) {
+      top = top.child;
+    }
+    return top;
+  }
 
+  var VM = global.VM = {};
   if(typeof exports !== 'undefined') {
-    exports.invokeFunction = invokeFunction;
-    exports.invokeRoot = invokeRoot;
+    exports.VM = VM;
   }
 
   var originalSrc;
   var debugInfo;
+  var curStack;
+
+  VM.Frame = Frame;
+  VM.getContext = getContext;
+  VM.releaseContext = releaseContext;
+  VM.invokeRoot = invokeRoot;
+  VM.getTopFrame = function() {
+    return getTopFrame(rootFrame);
+  };
+
+  VM.getFrameOffset = function(i) {
+    // TODO: this is really annoying, but it works for now. have to do
+    // two passes
+    var top = rootFrame;
+    var count = 0;
+    while(top.child) {
+      top = top.child;
+      count++;
+    }
+
+    var depth = count - i;
+    top = rootFrame;
+    count = 0;
+    while(top.child && count < depth) {
+      top = top.child;
+      count++;
+    }
+
+    return top;
+  };
 
   VM.setDebugInfo = function(info) {
     debugInfo = info;
+    VM.machineBreaks = new Array(debugInfo.length);
+
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      VM.machineBreaks[i] = [];
+    }
   };
 
-  VM.getLoc = function() {
-    return curFrame && curFrame.getLoc();
+  VM.getRootFrame = function() {
+    return rootFrame;
   };
 
-  VM.getCurrentFrame = function() {
-    return curFrame;
+  VM.run = function() {
+    if(!rootFrame) return;
+
+    // We need to get past this instruction that has a breakpoint, so
+    // turn off breakpoints and step past it, then turn them back on
+    // again and execute normally
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+
+    var nextFrame = rootFrame.ctx.frame;
+    VM.hasBreakpoints = true;
+    VM.stepping = false;
+    nextFrame.restore();
+    checkStatus(nextFrame.ctx);
+  };
+
+  VM.step = function() {
+    if(!rootFrame) return;
+
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+    VM.hasBreakpoints = true;
+
+    checkStatus(rootFrame.ctx);
+
+    // rootFrame now points to the new stack
+    var top = getTopFrame(rootFrame);
+
+    if(VM.state === VM.SUSPENDED &&
+       top.ctx.next === debugInfo[top.machineId].finalLoc) {
+      // if it's waiting to simply return a value, go ahead and run
+      // that step so the user doesn't have to step through each frame
+      // return
+      VM.step();
+    }
   };
 
   VM.evaluate = function(expr) {
     if(expr === '$_') {
       return lastEval;
     }
-    else if(curFrame) {
-      lastEval = curFrame.evaluate(expr);
+    else if(rootFrame) {
+      var top = VM.getTopFrame();
+      var res = top.evaluate(expr);
+
+      // switch frames to get any updated data
+      var parent = VM.getFrameOffset(1);
+      parent.child = res.frame;
+      // fix the self-referencing pointer
+      res.frame.ctx.frame = res.frame;
+
+      lastEval = res.result;
       return lastEval;
     }
   };
 
-  VM.reset = function(hard) {
-    VM.state = VM.IDLE;
-    curFrame = null;
+  VM.reset = function() {
     rootFrame = null;
+    debugInfo = null;
+    VM.state = IDLE;
+    VM.machineBreaks = [];
+    VM.stepping = false;
+  };
 
-    if(hard) {
-      debugInfo = null;
+  VM.isStepping = function() {
+    return VM.stepping;
+  };
+
+  VM.getLocation = function() {
+    if(!rootFrame) return;
+
+    var top = VM.getTopFrame();
+    return debugInfo[top.machineId].locs[top.ctx.next];
+  };
+
+  VM.toggleBreakpoint = function(internalLoc) {
+    if(!internalLoc) return;
+
+    var machineId = internalLoc.machineId;
+    var locId = internalLoc.locId;
+
+    if(VM.machineBreaks[machineId][locId] === undefined) {
+      VM.hasBreakpoints = true;
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = true;
+    }
+    else {
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = undefined;
+    }
+
+    return true;
+  };
+
+  VM.lineToInternalLoc = function(line) {
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      var locs = debugInfo[i].locs;
+      var keys = Object.keys(locs);
+
+      for(var cur=0, len=keys.length; cur<len; cur++) {
+        var loc = locs[keys[cur]];
+        if(loc.start.line === line) {
+          return {
+            machineId: i,
+            locId: keys[cur]
+          };
+        }
+      }
+    }
+
+    return null;
+  };
+
+  // TODO: I'm not sure we need this anymore. It should be
+  // deterministic when a function returns by other various
+  // heuristics.
+  // var UndefinedValue = Object.create(null, {
+  //   toString: function() { return 'undefined'; }
+  // });
+
+  var rootFrame;
+  var lastEval;
+
+  var IDLE = VM.IDLE = 1;
+  var SUSPENDED = VM.SUSPENDED = 2;
+  var EXECUTING = VM.EXECUTING = 3;
+
+  // frame
+
+  function Frame(machineId, name, fn, scope, outerScope,
+                 thisPtr, ctx, child) {
+    this.machineId = machineId;
+    this.name = name;
+    this.fn = fn;
+    this.scope = scope;
+    this.outerScope = outerScope;
+    this.thisPtr = thisPtr;
+    this.ctx = ctx;
+    this.child = child;
+  }
+
+  Frame.prototype.restore = function() {
+    this.fn.$ctx = this.ctx;
+    this.fn.call(this.thisPtr);
+  };
+
+  Frame.prototype.evaluate = function(expr) {
+    VM.evalArg = expr;
+    VM.error = null;
+    VM.stepping = true;
+
+    // Convert this frame into a childless frame that will just
+    // execute the eval instruction
+    var savedChild = this.child;
+    var ctx = new Context();
+    ctx.next = -1;
+    ctx.frame = this;
+    this.child = null;
+
+    this.fn.$ctx = ctx;
+    this.fn.call(this.thisPtr);
+
+    // Restore the stack
+    this.child = savedChild;
+
+    if(VM.error) {
+      var err = VM.error;
+      VM.error = null;
+      throw err;
+    }
+    else {
+      var newFrame = ctx.frame;
+      newFrame.child = this.child;
+      newFrame.ctx = this.ctx;
+
+      return {
+        result: ctx.rval,
+        frame: newFrame
+      };
     }
   };
 
-  var UndefinedValue = Object.create(null);
-  var rootFrame;
-  var curFrame;
-  var lastEval;
+  Frame.prototype.stackEach = function(func) {
+    if(this.child) {
+      this.child.stackEach(func);
+    }
+    func(this);
+  };
 
-  VM.IDLE = 'idle';
-  VM.SUSPENDED = 'suspended';
-  VM.EXECUTING = 'executing';
+  Frame.prototype.stackMap = function(func) {
+    var res;
+    if(this.child) {
+      res = this.child.stackMap(func);
+    }
+    else {
+      res = [];
+    }
 
-  function Frame(name, machineId, fn, self) {
-    var context = new Context();
-    this.self = self;
-    this.fn = fn;
-    this.name = name;
-    this.machineId = machineId;
+    res.push(func(this));
+    return res;
+  };
 
-    var savedNext = null;
+  Frame.prototype.stackReduce = function(func, acc) {
+    if(this.child) {
+      acc = this.child.stackReduce(func, acc);
+    }
 
-    this.run = function() {
-      VM.state = VM.EXECUTING;
-      context.state = 'executing';
+    return func(acc, this);
+  };
 
-      while(VM.state === VM.EXECUTING) {
-        curFrame.invoke();
-      }
-    };
+  Frame.prototype.getExpression = function(src) {
+    var loc = debugInfo[this.machineId].locs[this.ctx.next];
 
-    this.invoke = function() {
-      var prevState = VM.state;
-      savedNext = context.next;
-      fn.call(self, context);
+    if(loc && src) {
+      var line = src.split('\n')[loc.start.line - 1];
+      return line.slice(loc.start.column, loc.end.column);
+    }
+    return '';
+  };
 
-      if(context.done && !this.parent) {
-        VM.reset();
-      }
-      else if(context.invoke) {
-        var frame = context.invoke;
-        context.invoke = null;
-
-        if(frame instanceof Frame) {
-          frame.parent = this;
-          curFrame = frame;
-          curFrame.setState(context.state);
-        }
-        else {
-          // if it's not a frame, then a function was called
-          // that is not compiled for us. go ahead and just
-          // give the value back to the context and continue.
-          this.return(frame);
-        }
-      }
-      else if(context.rval !== UndefinedValue) {
-        // something was returned
-        var val = context.rval;
-        context.rval = UndefinedValue;
-        curFrame = this.parent;
-        curFrame.return(val);
-      }
-      else if(!context.done && context.state === 'suspended') {
-        VM.state = VM.SUSPENDED;
-      }
-
-      if(curFrame === rootFrame &&
-         !context.done &&
-         context.next === this.getFinalLoc()) {
-        // jump to the final location and end the program,
-        // regardless of any stepping
-        this.invoke();
-      }
-      else if(VM.state === VM.SUSPENDED) {
-        if(prevState !== VM.state) {
-          VM.onBreakpoint && VM.onBreakpoint();
-        }
-        else {
-          VM.onStep && VM.onStep();
-        }
-      }
-      else if(VM.state === VM.IDLE && VM.onFinish) {
-        VM.onFinish();
-      }
-    };
-
-    this.step = function() {
-      curFrame.invoke();
-    };
-
-    this.return = function(val) {
-      context.returned = val;
-    };
-
-    this.evaluate = function(expr) {
-      var savedLoc = context.next;
-      var evalLoc = this.getEvalLoc();
-
-      if(!evalLoc) {
-        throw new Error("cannot eval: debug information not available");
-      }
-
-      context.next = evalLoc;
-      try {
-        var ret = fn.call(self, context, expr);
-      }
-      finally {
-        context.next = savedLoc;
-      }
-
-      return ret;
-    };
-
-    this.setState = function(state) {
-      context.state = state;
-    };
-
-    this.getStack = function() {
-      if(this.parent) {
-        var frame = this.parent;
-        var stack = [[this.name, this.getLoc()]];
-
-        while(frame.parent) {
-          stack.push([frame.name, frame.getSavedLoc()]);
-          frame = frame.parent;
-        }
-
-        return stack.reverse();
-      }
-      else {
-        return [];
-      }
-    };
-
-    this.getLoc = function() {
-      return debugInfo[this.machineId].locs[context.next];
-    };
-
-    this.getSavedLoc = function() {
-      return debugInfo[this.machineId].locs[savedNext];
-    };
-
-    this.getFinalLoc = function() {
-      return debugInfo[this.machineId].finalLoc;
-    };
-
-    this.getEvalLoc = function() {
-      return debugInfo[this.machineId].evalLoc;
-    };
-
-    this.getExpression = function() {
-      //console.log(this.machineId, context.debugIdx || context.next);
-
-      var loc = this.getLoc();
-      if(loc && originalSrc) {
-        var line = originalSrc[loc.start.line - 1];
-        return line.slice(loc.start.column, loc.end.column);
-      }
-    };
-  }
+  // context
 
   function Context() {
     this.reset();
@@ -240,22 +332,34 @@
   Context.prototype = {
     constructor: Context,
 
-    reset: function() {
-      this.next = 0;
-      this.sent = void 0;
-      this.state = 'executing';
-      this.rval = UndefinedValue;
-      this.tryStack = [];
-      this.done = false;
-      this.delegate = null;
+    reset: function(initialState) {
+      this.softReset(initialState);
 
-      // Pre-initialize at least 20 temporary variables to enable hidden
+      // Pre-initialize at least 30 temporary variables to enable hidden
       // class optimizations for simple generators.
       for (var tempIndex = 0, tempName;
-           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 20;
+           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 30;
            ++tempIndex) {
         this[tempName] = null;
       }
+    },
+
+    softReset: function(initialState) {
+      this.next = 0;
+      this.lastNext = 0;
+      this.sent = void 0;
+      this.returned = void 0;
+      this.state = initialState || EXECUTING;
+      this.rval = void 0;
+      this.tryStack = [];
+      this.done = false;
+      this.delegate = null;
+      this.frame = null;
+      this.childFrame = null;
+      this.isCompiled = false;
+
+      this.staticBreakpoint = false;
+      this.stepping = false;
     },
 
     stop: function() {
@@ -267,9 +371,11 @@
         throw thrown;
       }
 
-      if(this.rval === UndefinedValue) {
-        this.rval = undefined;
-      }
+      // if(this.rval === UndefinedValue) {
+      //   this.rval = undefined;
+      // }
+
+      // return this.rval;
     },
 
     keys: function(object) {
@@ -363,4 +469,26 @@
       return info.value;
     }
   };
+
+  // cache
+
+  var cacheSize = 30000;
+  var _contexts = new Array(cacheSize);
+  var contextptr = 0;
+  for(var i=0; i<cacheSize; i++) {
+    _contexts[i] = new Context();
+  }
+
+  function getContext() {
+    if(contextptr < cacheSize) {
+      return _contexts[contextptr++];
+    }
+    else {
+      return new Context();
+    }
+  }
+
+  function releaseContext() {
+    contextptr--;
+  }
 }).call(this, (function() { return this; })());

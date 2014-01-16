@@ -1,82 +1,97 @@
 
-__debug_sourceURL="test.js";
+__debug_sourceURL="test3.js";
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
-
-  // cache
-
-  var _frames = [];
-  var frameptr = 0;
-  for(var i=0; i<50000; i++) {
-    _frames.push(new Frame());
-  }
-
-  function getFrame() {
-    return _frames[frameptr++];
-  }
-
-  function releaseFrame() {
-    frameptr--;
-  }
 
   // vm
 
   var findingRoot = false;
 
   function invokeRoot(fn, self) {
-    findingRoot = true;
-    rootFrame = curFrame = fn();
-    findingRoot = false;
+    VM.state = EXECUTING;
 
-    rootFrame.run();
+    var ctx = fn.$ctx = getContext();
+    ctx.softReset();
+    fn();
+    checkStatus(ctx);
   }
 
-  function invokeFunction(name, id, fn, self) {
-    var frame = getFrame();
-    frame.context = new Context();
-    frame.fn = fn;
-    frame.name = name;
-    frame.machineId = id;
-    frame.savedNext = null;
+  function checkStatus(ctx) {
+    if(ctx.frame) {
+      ctx.frame.name = 'top-level';
 
-    if(!rootFrame && !findingRoot) {
-      // no root frame means that it's being called from outside
-      // our control, most likely something async. simply make
-      // this the root frame!! this makes ALL FUNCTIONS
-      // INTEROPERABLE! without having to shim anything. we
-      // could even have hooks for when async is entered/exited
-      // and create neat debugging tools for that.
+      // machine was paused
+      VM.state = VM.SUSPENDED;
+      rootFrame = ctx.frame;
 
-      rootFrame = curFrame = frame;
-      rootFrame.run();
+      if(VM.isStepping()) {
+        VM.onStep && VM.onStep();
+      }
+      else {
+        VM.onBreakpoint && VM.onBreakpoint();
+      }
+
+      VM.stepping = true;
     }
     else {
-      return frame;
+      VM.reset();
+      VM.onFinish && VM.onFinish();
     }
   }
 
-  global.invokeFunction = invokeFunction;
-  global.invokeRoot = invokeRoot;
   var VM = global.VM = {};
-
   if(typeof exports !== 'undefined') {
-    exports.invokeFunction = invokeFunction;
-    exports.invokeRoot = invokeRoot;
+    exports.VM = VM;
   }
 
   var originalSrc;
   var debugInfo;
+  var curStack;
+
+  VM.Frame = Frame;
+  VM.getContext = getContext;
+  VM.releaseContext = releaseContext;
+  VM.invokeRoot = invokeRoot;
 
   VM.setDebugInfo = function(info) {
     debugInfo = info;
+    VM.machineBreaks = new Array(debugInfo.length);
+
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      VM.machineBreaks[i] = [];
+    }
   };
 
-  VM.getLoc = function() {
-    return curFrame && curFrame.getLoc();
+  VM.getRootFrame = function() {
+    return rootFrame;
   };
 
-  VM.getCurrentFrame = function() {
-    return curFrame;
+  VM.run = function() {
+    if(!rootFrame) return;
+
+    // We need to get past this instruction that has a breakpoint, so
+    // turn off breakpoints and step past it, then turn them back on
+    // again and execute normally
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+
+    var nextFrame = rootFrame.ctx.frame;
+    VM.hasBreakpoints = true;
+    VM.stepping = false;
+    nextFrame.restore();
+    checkStatus(nextFrame.ctx);
+  };
+
+  VM.step = function() {
+    if(!rootFrame) return;
+
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+    VM.hasBreakpoints = true;
+
+    checkStatus(rootFrame.ctx);
   };
 
   VM.evaluate = function(expr) {
@@ -96,7 +111,60 @@ __debug_sourceURL="test.js";
 
     if(hard) {
       debugInfo = null;
+      machineBreaks = [];
     }
+  };
+
+  VM.isStepping = function() {
+    return VM.stepping;
+  };
+
+  VM.getLocation = function() {
+    if(!rootFrame) return;
+
+    var leaf = rootFrame;
+    while(leaf.child) {
+      leaf = leaf.child;
+    }
+
+    return debugInfo[leaf.machineId].locs[leaf.ctx.next];
+  };
+
+  VM.toggleBreakpoint = function(internalLoc) {
+    var machineId = internalLoc.machineId;
+    var locId = internalLoc.locId;
+
+    if(VM.machineBreaks[machineId][locId] === undefined) {
+      VM.hasBreakpoints = true;
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = true;
+
+      console.log('turned on ', internalLoc.machineId, internalLoc.locId);
+    }
+    else {
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = undefined;
+    }
+  };
+
+  VM.lineToInternalLoc = function(line) {
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      var locs = debugInfo[i].locs;
+      var keys = Object.keys(locs);
+
+      for(var cur=0, len=keys.length; cur<len; cur++) {
+        var loc = locs[keys[cur]];
+        if(loc.start.line === line) {
+          console.log(loc);
+          console.log(keys[cur]);
+
+          return {
+            machineId: i,
+            locId: keys[cur]
+          };
+        }
+      }
+    }
+
+    return null;
   };
 
   var UndefinedValue = Object.create(null);
@@ -104,145 +172,53 @@ __debug_sourceURL="test.js";
   var curFrame;
   var lastEval;
 
-  // Be aware: getDispatchLoop in emit.js hardcodes the value 3 to
-  // represent VM.EXECUTING
   var IDLE = VM.IDLE = 1;
   var SUSPENDED = VM.SUSPENDED = 2;
   var EXECUTING = VM.EXECUTING = 3;
 
-  function Frame() {
+  function Frame(machineId, name, fn, scope, thisPtr, ctx, child) {
+    this.machineId = machineId;
+    this.name = name;
+    this.fn = fn;
+    this.scope = scope;
+    this.thisPtr = thisPtr;
+    this.ctx = ctx;
+    this.child = child;
   }
 
-  // function Frame(name, machineId, fn, self) {
-  // }
-
-  Frame.prototype.run = function() {
-    VM.state = EXECUTING;
-    this.context.state = EXECUTING;
-
-    while(VM.state === EXECUTING) {
-      curFrame.invoke();
-    }
+  Frame.prototype.restore = function() {
+    var ctx = this.ctx;
+    ctx.stepping = VM.isStepping();
+    this.fn.$ctx = ctx;
+    this.fn.call(this.thisPtr);
   };
 
-  Frame.prototype.invoke = function() {
-    var context = this.context;
-    var prevState = VM.state;
-    this.savedNext = context.next;
-
-    this.fn(context);
-
-    if(context.done && !this.parent) {
-      VM.reset();
+  Frame.prototype.stackEach = function(func) {
+    if(this.child) {
+      this.child.stackEach(func);
     }
-    else if(context.invoke) {
-      this.callFunction();
-    }
-    else if(context.rval !== UndefinedValue) {
-      this.returnValue();
-    }
-    else if(!context.done && context.state === SUSPENDED) {
-      VM.state = VM.SUSPENDED;
-    }
-
-    // if(curFrame === rootFrame &&
-    //    !context.done &&
-    //    context.next === this.getFinalLoc()) {
-    //   // jump to the final location and end the program,
-    //   // regardless of any stepping
-    //   this.invoke();
-    // }
-    // else if(VM.state === SUSPENDED) {
-    //   if(prevState !== VM.state) {
-    //     VM.onBreakpoint && VM.onBreakpoint();
-    //   }
-    //   else {
-    //     VM.onStep && VM.onStep();
-    //   }
-    // }
-    // else if(VM.state === IDLE && VM.onFinish) {
-    //   VM.onFinish();
-    // }
+    func(this);
   };
 
-  Frame.prototype.callFunction = function() {
-    var context = this.context;
-    var frame = context.invoke;
-    context.invoke = null;
-
-    if(frame instanceof Frame) {
-      frame.parent = this;
-      curFrame = frame;
-      curFrame.setState(context.state);
+  Frame.prototype.stackMap = function(func) {
+    var res;
+    if(this.child) {
+      res = this.child.stackMap(func);
     }
     else {
-      // if it's not a frame, then a function was called
-      // that is not compiled for us. go ahead and just
-      // give the value back to the context and continue.
-      this.return(frame);
-    }
-  };
-
-  Frame.prototype.returnValue = function() {
-    // something was returned
-    var context = this.context;
-    var val = context.rval;
-    context.rval = UndefinedValue;
-    curFrame = this.parent;
-    curFrame.return(val);
-    releaseFrame();
-  };
-
-  Frame.prototype.step = function() {
-    curFrame.invoke();
-  };
-
-  Frame.prototype.return = function(val) {
-    this.context.returned = val;
-  };
-
-  Frame.prototype.evaluate = function(expr) {
-    var savedLoc = this.context.next;
-    var evalLoc = this.getEvalLoc();
-
-    if(!evalLoc) {
-      throw new Error("cannot eval: debug information not available");
+      res = [];
     }
 
-    this.context.next = evalLoc;
-    try {
-      var ret = fn.call(self, this.context, expr);
-    }
-    finally {
-      this.context.next = savedLoc;
-    }
-
-    return ret;
+    res.push(func(this));
+    return res;
   };
 
-  Frame.prototype.setState = function(state) {
-    this.context.state = state;
-  };
-
-  Frame.prototype.getStack = function() {
-    if(this.parent) {
-      var frame = this.parent;
-      var stack = [[this.name, this.getLoc()]];
-
-      while(frame.parent) {
-        stack.push([frame.name, frame.getSavedLoc()]);
-        frame = frame.parent;
-      }
-
-      return stack.reverse();
+  Frame.prototype.stackReduce = function(func, acc) {
+    if(this.child) {
+      acc = this.child.stackReduce(func, acc);
     }
-    else {
-      return [];
-    }
-  };
 
-  Frame.prototype.getLoc = function() {
-    return debugInfo[this.machineId].locs[this.context.next];
+    return func(acc, this);
   };
 
   Frame.prototype.getSavedLoc = function() {
@@ -274,22 +250,34 @@ __debug_sourceURL="test.js";
   Context.prototype = {
     constructor: Context,
 
-    reset: function() {
+    reset: function(initialState) {
+      this.softReset(initialState);
+
+      // Pre-initialize at least 30 temporary variables to enable hidden
+      // class optimizations for simple generators.
+      for (var tempIndex = 0, tempName;
+           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 30;
+           ++tempIndex) {
+        this[tempName] = null;
+      }
+    },
+
+    softReset: function(initialState) {
       this.next = 0;
+      this.lastNext = 0;
       this.sent = void 0;
-      this.state = EXECUTING;
+      this.returned = void 0;
+      this.state = initialState || EXECUTING;
       this.rval = UndefinedValue;
       this.tryStack = [];
       this.done = false;
       this.delegate = null;
+      this.frame = null;
+      this.childFrame = null;
+      this.isCompiled = false;
 
-      // Pre-initialize at least 20 temporary variables to enable hidden
-      // class optimizations for simple generators.
-      for (var tempIndex = 0, tempName;
-           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 20;
-           ++tempIndex) {
-        this[tempName] = null;
-      }
+      this.staticBreakpoint = false;
+      this.stepping = false;
     },
 
     stop: function() {
@@ -301,9 +289,11 @@ __debug_sourceURL="test.js";
         throw thrown;
       }
 
-      if(this.rval === UndefinedValue) {
-        this.rval = undefined;
-      }
+      // if(this.rval === UndefinedValue) {
+      //   this.rval = undefined;
+      // }
+
+      //return this.rval;
     },
 
     keys: function(object) {
@@ -397,863 +387,1204 @@ __debug_sourceURL="test.js";
       return info.value;
     }
   };
+
+  // cache
+
+  var cacheSize = 30000;
+  var _contexts = new Array(cacheSize);
+  var contextptr = 0;
+  for(var i=0; i<cacheSize; i++) {
+    _contexts[i] = new Context();
+  }
+
+  function getContext() {
+    if(contextptr < cacheSize) {
+      return _contexts[contextptr++];
+    }
+    else {
+      return new Context();
+    }
+  }
+
+  function releaseContext() {
+    contextptr--;
+  }
 }).call(this, (function() { return this; })());
 
-VM.setDebugInfo({
-    "1": {
-        "finalLoc": 21,
+VM.setDebugInfo([{
+  "finalLoc": 31,
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 2,
-                    "column": 0
-                },
+  "locs": {
+    "0": {
+      "start": {
+        "line": 2,
+        "column": 0
+      },
 
-                "end": {
-                    "line": 9,
-                    "column": 1
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 2,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 9,
-                    "column": 1
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 11,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 17,
-                    "column": 1
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 11,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 17,
-                    "column": 1
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 19,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 27,
-                    "column": 1
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 19,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 27,
-                    "column": 1
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 29,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 34,
-                    "column": 1
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 29,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 34,
-                    "column": 1
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 36,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 38,
-                    "column": 1
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 36,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 38,
-                    "column": 1
-                }
-            },
-
-            "15": {
-                "start": {
-                    "line": 40,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 40,
-                    "column": 17
-                }
-            },
-
-            "18": {
-                "start": {
-                    "line": 40,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 40,
-                    "column": 18
-                }
-            }
-        }
+      "end": {
+        "line": 9,
+        "column": 1
+      }
     },
 
-    "2": {
-        "finalLoc": 20,
+    "1": {
+      "start": {
+        "line": 2,
+        "column": 0
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 3,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 3,
-                    "column": 13
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 3,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 3,
-                    "column": 13
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 4,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 4,
-                    "column": 28
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 4,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 4,
-                    "column": 28
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 5,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 20
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 5,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 20
-                }
-            },
-
-            "8": {
-                "start": {
-                    "line": 5,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 13
-                }
-            },
-
-            "11": {
-                "start": {
-                    "line": 6,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 6,
-                    "column": 19
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 6,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 6,
-                    "column": 19
-                }
-            },
-
-            "16": {
-                "start": {
-                    "line": 8,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 8,
-                    "column": 13
-                }
-            }
-        }
+      "end": {
+        "line": 9,
+        "column": 1
+      }
     },
 
     "3": {
-        "finalLoc": 24,
+      "start": {
+        "line": 11,
+        "column": 0
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 12,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 12,
-                    "column": 14
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 12,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 12,
-                    "column": 14
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 13,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 15
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 13,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 15
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 13,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 20
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 14,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 14,
-                    "column": 13
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 14,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 14,
-                    "column": 13
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 13,
-                    "column": 22
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 25
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 13,
-                    "column": 22
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 25
-                }
-            },
-
-            "17": {
-                "start": {
-                    "line": 16,
-                    "column": 11
-                },
-
-                "end": {
-                    "line": 16,
-                    "column": 18
-                }
-            },
-
-            "20": {
-                "start": {
-                    "line": 16,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 16,
-                    "column": 19
-                }
-            }
-        }
+      "end": {
+        "line": 17,
+        "column": 1
+      }
     },
 
     "4": {
-        "finalLoc": 17,
+      "start": {
+        "line": 11,
+        "column": 0
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 20,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 20,
-                    "column": 14
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 20,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 20,
-                    "column": 14
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 22,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 22,
-                    "column": 13
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 22,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 22,
-                    "column": 13
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 23,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 23,
-                    "column": 11
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 23,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 23,
-                    "column": 11
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 24,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 24,
-                    "column": 17
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 26,
-                    "column": 11
-                },
-
-                "end": {
-                    "line": 26,
-                    "column": 20
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 26,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 26,
-                    "column": 21
-                }
-            }
-        }
-    },
-
-    "5": {
-        "finalLoc": 20,
-
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 30,
-                    "column": 7
-                },
-
-                "end": {
-                    "line": 30,
-                    "column": 12
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 31,
-                    "column": 15
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 24
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 31,
-                    "column": 31
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 36
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 31,
-                    "column": 27
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 37
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 31,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 38
-                }
-            },
-
-            "16": {
-                "start": {
-                    "line": 33,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 33,
-                    "column": 13
-                }
-            }
-        }
+      "end": {
+        "line": 17,
+        "column": 1
+      }
     },
 
     "6": {
-        "finalLoc": 7,
+      "start": {
+        "line": 19,
+        "column": 0
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 37,
-                    "column": 11
-                },
+      "end": {
+        "line": 27,
+        "column": 1
+      }
+    },
 
-                "end": {
-                    "line": 37,
-                    "column": 21
-                }
-            },
+    "7": {
+      "start": {
+        "line": 19,
+        "column": 0
+      },
 
-            "3": {
-                "start": {
-                    "line": 37,
-                    "column": 4
-                },
+      "end": {
+        "line": 27,
+        "column": 1
+      }
+    },
 
-                "end": {
-                    "line": 37,
-                    "column": 22
-                }
-            }
-        }
+    "9": {
+      "start": {
+        "line": 29,
+        "column": 0
+      },
+
+      "end": {
+        "line": 34,
+        "column": 1
+      }
+    },
+
+    "10": {
+      "start": {
+        "line": 29,
+        "column": 0
+      },
+
+      "end": {
+        "line": 34,
+        "column": 1
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 36,
+        "column": 0
+      },
+
+      "end": {
+        "line": 38,
+        "column": 1
+      }
+    },
+
+    "13": {
+      "start": {
+        "line": 36,
+        "column": 0
+      },
+
+      "end": {
+        "line": 38,
+        "column": 1
+      }
+    },
+
+    "15": {
+      "start": {
+        "line": 40,
+        "column": 12
+      },
+
+      "end": {
+        "line": 40,
+        "column": 17
+      }
+    },
+
+    "23": {
+      "start": {
+        "line": 40,
+        "column": 0
+      },
+
+      "end": {
+        "line": 40,
+        "column": 18
+      }
     }
-});
+  }
+}, {
+  "finalLoc": 20,
 
-var root = (function() {
-    var quux, mumble, baz, bar, foo;
+  "locs": {
+    "0": {
+      "start": {
+        "line": 3,
+        "column": 6
+      },
 
-    return invokeFunction("\u003Canon\u003E", 1, function($ctx) {
-        do switch ($ctx.next) {
-        case 0:
-            quux = function quux(i) {
-                var z, obj, k;
+      "end": {
+        "line": 3,
+        "column": 11
+      }
+    },
 
-                return invokeFunction("quux", 2, function quux$($ctx) {
-                    do switch ($ctx.next) {
-                    case 0:
-                        z = 1;
-                        $ctx.next = 3;
-                        return;
-                    case 3:
-                        obj = {
-                            x: 1,
-                            y: 2
-                        };
+    "1": {
+      "start": {
+        "line": 3,
+        "column": 6
+      },
 
-                        $ctx.next = 6;
-                        return;
-                    case 6:
-                        $ctx.t0 = $ctx.keys(obj);
-                    case 7:
-                        if (!$ctx.t0.length) {
-                            $ctx.next = 16;
-                            break;
-                        }
+      "end": {
+        "line": 3,
+        "column": 11
+      }
+    },
 
-                        k = $ctx.t0.pop();
-                        $ctx.next = 11;
-                        return;
-                    case 11:
-                        z *= obj[k];
-                        $ctx.next = 7;
-                        return;
-                    case 14:
-                        $ctx.next = 7;
-                        break;
-                    case 16:
-                        $ctx.rval = z;
-                        delete $ctx.thrown;
-                        $ctx.next = 20;
-                        break;
-                    case 20:
-                        return $ctx.stop();
-                    } while ($ctx.state === 3);
-                }, this);
-            };
+    "3": {
+      "start": {
+        "line": 4,
+        "column": 6
+      },
 
+      "end": {
+        "line": 4,
+        "column": 26
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 4,
+        "column": 6
+      },
+
+      "end": {
+        "line": 4,
+        "column": 26
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 5,
+        "column": 15
+      },
+
+      "end": {
+        "line": 5,
+        "column": 18
+      }
+    },
+
+    "7": {
+      "start": {
+        "line": 5,
+        "column": 15
+      },
+
+      "end": {
+        "line": 5,
+        "column": 18
+      }
+    },
+
+    "8": {
+      "start": {
+        "line": 5,
+        "column": 10
+      },
+
+      "end": {
+        "line": 5,
+        "column": 11
+      }
+    },
+
+    "11": {
+      "start": {
+        "line": 6,
+        "column": 4
+      },
+
+      "end": {
+        "line": 6,
+        "column": 15
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 6,
+        "column": 4
+      },
+
+      "end": {
+        "line": 6,
+        "column": 15
+      }
+    },
+
+    "16": {
+      "start": {
+        "line": 8,
+        "column": 2
+      },
+
+      "end": {
+        "line": 8,
+        "column": 11
+      }
+    }
+  }
+}, {
+  "finalLoc": 29,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 12,
+        "column": 6
+      },
+
+      "end": {
+        "line": 12,
+        "column": 12
+      }
+    },
+
+    "1": {
+      "start": {
+        "line": 12,
+        "column": 6
+      },
+
+      "end": {
+        "line": 12,
+        "column": 12
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 13,
+        "column": 10
+      },
+
+      "end": {
+        "line": 13,
+        "column": 13
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 13,
+        "column": 10
+      },
+
+      "end": {
+        "line": 13,
+        "column": 13
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 13,
+        "column": 15
+      },
+
+      "end": {
+        "line": 13,
+        "column": 18
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 14,
+        "column": 4
+      },
+
+      "end": {
+        "line": 14,
+        "column": 9
+      }
+    },
+
+    "10": {
+      "start": {
+        "line": 14,
+        "column": 4
+      },
+
+      "end": {
+        "line": 14,
+        "column": 9
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 13,
+        "column": 20
+      },
+
+      "end": {
+        "line": 13,
+        "column": 23
+      }
+    },
+
+    "13": {
+      "start": {
+        "line": 13,
+        "column": 20
+      },
+
+      "end": {
+        "line": 13,
+        "column": 23
+      }
+    },
+
+    "17": {
+      "start": {
+        "line": 16,
+        "column": 9
+      },
+
+      "end": {
+        "line": 16,
+        "column": 16
+      }
+    },
+
+    "25": {
+      "start": {
+        "line": 16,
+        "column": 2
+      },
+
+      "end": {
+        "line": 16,
+        "column": 17
+      }
+    }
+  }
+}, {
+  "finalLoc": 22,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 20,
+        "column": 6
+      },
+
+      "end": {
+        "line": 20,
+        "column": 12
+      }
+    },
+
+    "1": {
+      "start": {
+        "line": 20,
+        "column": 6
+      },
+
+      "end": {
+        "line": 20,
+        "column": 12
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 22,
+        "column": 4
+      },
+
+      "end": {
+        "line": 22,
+        "column": 9
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 22,
+        "column": 4
+      },
+
+      "end": {
+        "line": 22,
+        "column": 9
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 23,
+        "column": 4
+      },
+
+      "end": {
+        "line": 23,
+        "column": 7
+      }
+    },
+
+    "7": {
+      "start": {
+        "line": 23,
+        "column": 4
+      },
+
+      "end": {
+        "line": 23,
+        "column": 7
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 24,
+        "column": 10
+      },
+
+      "end": {
+        "line": 24,
+        "column": 15
+      }
+    },
+
+    "10": {
+      "start": {
+        "line": 26,
+        "column": 9
+      },
+
+      "end": {
+        "line": 26,
+        "column": 18
+      }
+    },
+
+    "18": {
+      "start": {
+        "line": 26,
+        "column": 2
+      },
+
+      "end": {
+        "line": 26,
+        "column": 19
+      }
+    }
+  }
+}, {
+  "finalLoc": 30,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 30,
+        "column": 5
+      },
+
+      "end": {
+        "line": 30,
+        "column": 10
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 31,
+        "column": 11
+      },
+
+      "end": {
+        "line": 31,
+        "column": 17
+      }
+    },
+
+    "11": {
+      "start": {
+        "line": 31,
+        "column": 24
+      },
+
+      "end": {
+        "line": 31,
+        "column": 29
+      }
+    },
+
+    "14": {
+      "start": {
+        "line": 31,
+        "column": 20
+      },
+
+      "end": {
+        "line": 31,
+        "column": 30
+      }
+    },
+
+    "22": {
+      "start": {
+        "line": 31,
+        "column": 4
+      },
+
+      "end": {
+        "line": 31,
+        "column": 31
+      }
+    },
+
+    "26": {
+      "start": {
+        "line": 33,
+        "column": 2
+      },
+
+      "end": {
+        "line": 33,
+        "column": 13
+      }
+    }
+  }
+}, {
+  "finalLoc": 12,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 37,
+        "column": 9
+      },
+
+      "end": {
+        "line": 37,
+        "column": 19
+      }
+    },
+
+    "8": {
+      "start": {
+        "line": 37,
+        "column": 2
+      },
+
+      "end": {
+        "line": 37,
+        "column": 20
+      }
+    }
+  }
+}]);
+
+var root = (function $anon1() {
+  var quux, mumble, baz, bar, foo;
+  var $ctx = $anon1.$ctx;
+  $ctx.isCompiled = true;
+
+  if ($ctx.frame) {
+    quux = $ctx.frame.scope.quux;
+    mumble = $ctx.frame.scope.mumble;
+    baz = $ctx.frame.scope.baz;
+    bar = $ctx.frame.scope.bar;
+    foo = $ctx.frame.scope.foo;
+    var $child = $ctx.frame.child;
+
+    if ($child) {
+      var $child$ctx = $child.ctx;
+      $child.fn.$ctx = $child$ctx;
+      $child.fn.call($child.thisPtr);
+
+      if ($child$ctx.frame) {
+        $ctx.frame.child = $child$ctx.frame;
+        return;
+      } else {
+        $ctx.frame = null;
+        $ctx.childFrame = null;
+        $ctx[$ctx.resultLoc] = $child$ctx.rval;
+      }
+    } else {
+      if ($ctx.staticBreakpoint)
+        $ctx.next = $ctx.next + 3;
+
+      $ctx.frame = null;
+      $ctx.childFrame = null;
+    }
+  }
+
+  while (1) {
+    if (VM.hasBreakpoints && VM.machineBreaks[0][$ctx.next] !== undefined)
+      break;
+
+    switch ($ctx.next) {
+    case 0:
+      quux = function quux(i) {
+        var z, obj, k;
+        var $ctx = quux.$ctx;
+        $ctx.isCompiled = true;
+
+        if ($ctx.frame) {
+          i = $ctx.frame.scope.i;
+          z = $ctx.frame.scope.z;
+          obj = $ctx.frame.scope.obj;
+          k = $ctx.frame.scope.k;
+          var $child = $ctx.frame.child;
+
+          if ($child) {
+            var $child$ctx = $child.ctx;
+            $child.fn.$ctx = $child$ctx;
+            $child.fn.call($child.thisPtr);
+
+            if ($child$ctx.frame) {
+              $ctx.frame.child = $child$ctx.frame;
+              return;
+            } else {
+              $ctx.frame = null;
+              $ctx.childFrame = null;
+              $ctx[$ctx.resultLoc] = $child$ctx.rval;
+            }
+          } else {
+            if ($ctx.staticBreakpoint)
+              $ctx.next = $ctx.next + 3;
+
+            $ctx.frame = null;
+            $ctx.childFrame = null;
+          }
+        }
+
+        while (1) {
+          if (VM.hasBreakpoints && VM.machineBreaks[1][$ctx.next] !== undefined)
+            break;
+
+          switch ($ctx.next) {
+          case 0:
+            z = 1;
             $ctx.next = 3;
-            return;
-        case 3:
-            mumble = function mumble(i) {
-                var z, j;
-
-                return invokeFunction("mumble", 3, function mumble$($ctx) {
-                    do switch ($ctx.next) {
-                    case 0:
-                        z = 10;
-                        $ctx.next = 3;
-                        return;
-                    case 3:
-                        j = 0;
-                        $ctx.next = 6;
-                        return;
-                    case 6:
-                        if (!(j < i)) {
-                            $ctx.next = 17;
-                            break;
-                        }
-
-                        $ctx.next = 9;
-                        return;
-                    case 9:
-                        z = j;
-                        $ctx.next = 12;
-                        return;
-                    case 12:
-                        j++;
-                        $ctx.next = 6;
-                        return;
-                    case 15:
-                        $ctx.next = 6;
-                        break;
-                    case 17:
-                        $ctx.invoke = quux(z);
-                        $ctx.next = 20;
-                        return;
-                    case 20:
-                        $ctx.rval = $ctx.returned;
-                        delete $ctx.thrown;
-                        $ctx.next = 24;
-                        break;
-                    case 24:
-                        return $ctx.stop();
-                    } while ($ctx.state === 3);
-                }, this);
+            break;
+          case 3:
+            obj = {
+              x: 1,
+              y: 2
             };
 
             $ctx.next = 6;
-            return;
-        case 6:
-            baz = function baz(i) {
-                var j;
+            break;
+          case 6:
+            $ctx.t0 = $ctx.keys(obj);
+          case 7:
+            if (!$ctx.t0.length) {
+              $ctx.next = 16;
+              break;
+            }
 
-                return invokeFunction("baz", 4, function baz$($ctx) {
-                    do switch ($ctx.next) {
-                    case 0:
-                        j = 10;
-                        $ctx.next = 3;
-                        return;
-                    case 3:
-                        j = 5;
-                        $ctx.next = 6;
-                        return;
-                    case 6:
-                        i--;
-                        $ctx.next = 9;
-                        return;
-                    case 9:
-                        if (i > 0) {
-                            $ctx.next = 3;
-                            break;
-                        }
-                    case 10:
-                        $ctx.invoke = mumble(j);
-                        $ctx.next = 13;
-                        return;
-                    case 13:
-                        $ctx.rval = $ctx.returned;
-                        delete $ctx.thrown;
-                        $ctx.next = 17;
-                        break;
-                    case 17:
-                        return $ctx.stop();
-                    } while ($ctx.state === 3);
-                }, this);
-            };
+            k = $ctx.t0.pop();
+            $ctx.next = 11;
+            break;
+          case 11:
+            z *= obj[k];
+            $ctx.next = 7;
+            break;
+          case 14:
+            $ctx.next = 7;
+            break;
+          case 16:
+            $ctx.rval = z;
+            delete $ctx.thrown;
+            $ctx.next = 20;
+            break;
+          case 20:
+            return $ctx.stop();
+          }
+
+          if (VM.stepping)
+            break;
+        }
+
+        $ctx.frame = new VM.Frame(1, "quux", quux, {
+          "i": i,
+          "z": z,
+          "obj": obj,
+          "k": k
+        }, this, $ctx, $ctx.childFrame);
+      };
+
+      $ctx.next = 3;
+      break;
+    case 3:
+      mumble = function mumble(i) {
+        var z, j;
+        var $ctx = mumble.$ctx;
+        $ctx.isCompiled = true;
+
+        if ($ctx.frame) {
+          i = $ctx.frame.scope.i;
+          z = $ctx.frame.scope.z;
+          j = $ctx.frame.scope.j;
+          var $child = $ctx.frame.child;
+
+          if ($child) {
+            var $child$ctx = $child.ctx;
+            $child.fn.$ctx = $child$ctx;
+            $child.fn.call($child.thisPtr);
+
+            if ($child$ctx.frame) {
+              $ctx.frame.child = $child$ctx.frame;
+              return;
+            } else {
+              $ctx.frame = null;
+              $ctx.childFrame = null;
+              $ctx[$ctx.resultLoc] = $child$ctx.rval;
+            }
+          } else {
+            if ($ctx.staticBreakpoint)
+              $ctx.next = $ctx.next + 3;
+
+            $ctx.frame = null;
+            $ctx.childFrame = null;
+          }
+        }
+
+        while (1) {
+          if (VM.hasBreakpoints && VM.machineBreaks[2][$ctx.next] !== undefined)
+            break;
+
+          switch ($ctx.next) {
+          case 0:
+            z = 10;
+            $ctx.next = 3;
+            break;
+          case 3:
+            j = 0;
+            $ctx.next = 6;
+            break;
+          case 6:
+            if (!(j < i)) {
+              $ctx.next = 17;
+              break;
+            }
 
             $ctx.next = 9;
-            return;
-        case 9:
-            bar = function bar(i) {
-                return invokeFunction("bar", 5, function bar$($ctx) {
-                    do switch ($ctx.next) {
-                    case 0:
-                        if (!(i > 0)) {
-                            $ctx.next = 16;
-                            break;
-                        }
-
-                        $ctx.next = 3;
-                        return;
-                    case 3:
-                        $ctx.invoke = mumble(i);
-                        $ctx.next = 6;
-                        return;
-                    case 6:
-                        $ctx.t1 = i - 1;
-                        $ctx.next = 9;
-                        return;
-                    case 9:
-                        $ctx.invoke = bar($ctx.t1);
-                        $ctx.next = 12;
-                        return;
-                    case 12:
-                        $ctx.rval = $ctx.returned + $ctx.returned;
-                        delete $ctx.thrown;
-                        $ctx.next = 20;
-                        break;
-                    case 16:
-                        $ctx.rval = 0;
-                        delete $ctx.thrown;
-                        $ctx.next = 20;
-                        break;
-                    case 20:
-                        return $ctx.stop();
-                    } while ($ctx.state === 3);
-                }, this);
-            };
-
+            break;
+          case 9:
+            z = j;
             $ctx.next = 12;
-            return;
-        case 12:
-            foo = function foo() {
-                return invokeFunction("foo", 6, function foo$($ctx) {
-                    do switch ($ctx.next) {
-                    case 0:
-                        $ctx.invoke = bar(10000);
-                        $ctx.next = 3;
-                        return;
-                    case 3:
-                        $ctx.rval = $ctx.returned;
-                        delete $ctx.thrown;
-                        $ctx.next = 7;
-                        break;
-                    case 7:
-                        return $ctx.stop();
-                    } while ($ctx.state === 3);
-                }, this);
-            };
+            break;
+          case 12:
+            j++;
+            $ctx.next = 6;
+            break;
+          case 15:
+            $ctx.next = 6;
+            break;
+          case 17:
+            var $t2 = quux.$ctx = VM.getContext();
+            $t2.softReset();
+            var $t3 = quux(z);
+            $ctx.next = 25;
 
-            $ctx.next = 15;
-            return;
-        case 15:
-            $ctx.invoke = foo();
-            $ctx.next = 18;
-            return;
-        case 18:
-            $ctx.invoke = console.log($ctx.returned);
-            $ctx.next = 21;
-            return;
-        case 21:
+            if ($t2.frame) {
+              $ctx.childFrame = $t2.frame;
+              $ctx.resultLoc = "t1";
+              VM.stepping = true;
+              break;
+            }
+
+            $ctx.t1 = ($t2.isCompiled ? $t2.rval : $t3);
+            VM.releaseContext();
+            break;
+          case 25:
+            $ctx.rval = $ctx.t1;
+            delete $ctx.thrown;
+            $ctx.next = 29;
+            break;
+          case 29:
             return $ctx.stop();
-        } while ($ctx.state === 3);
-    }, this);
+          }
+
+          if (VM.stepping)
+            break;
+        }
+
+        $ctx.frame = new VM.Frame(2, "mumble", mumble, {
+          "i": i,
+          "z": z,
+          "j": j
+        }, this, $ctx, $ctx.childFrame);
+      };
+
+      $ctx.next = 6;
+      break;
+    case 6:
+      baz = function baz(i) {
+        var j;
+        var $ctx = baz.$ctx;
+        $ctx.isCompiled = true;
+
+        if ($ctx.frame) {
+          i = $ctx.frame.scope.i;
+          j = $ctx.frame.scope.j;
+          var $child = $ctx.frame.child;
+
+          if ($child) {
+            var $child$ctx = $child.ctx;
+            $child.fn.$ctx = $child$ctx;
+            $child.fn.call($child.thisPtr);
+
+            if ($child$ctx.frame) {
+              $ctx.frame.child = $child$ctx.frame;
+              return;
+            } else {
+              $ctx.frame = null;
+              $ctx.childFrame = null;
+              $ctx[$ctx.resultLoc] = $child$ctx.rval;
+            }
+          } else {
+            if ($ctx.staticBreakpoint)
+              $ctx.next = $ctx.next + 3;
+
+            $ctx.frame = null;
+            $ctx.childFrame = null;
+          }
+        }
+
+        while (1) {
+          if (VM.hasBreakpoints && VM.machineBreaks[3][$ctx.next] !== undefined)
+            break;
+
+          switch ($ctx.next) {
+          case 0:
+            j = 10;
+            $ctx.next = 3;
+            break;
+          case 3:
+            j = 5;
+            $ctx.next = 6;
+            break;
+          case 6:
+            i--;
+            $ctx.next = 9;
+            break;
+          case 9:
+            if (i > 0) {
+              $ctx.next = 3;
+              break;
+            }
+          case 10:
+            var $t5 = mumble.$ctx = VM.getContext();
+            $t5.softReset();
+            var $t6 = mumble(j);
+            $ctx.next = 18;
+
+            if ($t5.frame) {
+              $ctx.childFrame = $t5.frame;
+              $ctx.resultLoc = "t4";
+              VM.stepping = true;
+              break;
+            }
+
+            $ctx.t4 = ($t5.isCompiled ? $t5.rval : $t6);
+            VM.releaseContext();
+            break;
+          case 18:
+            $ctx.rval = $ctx.t4;
+            delete $ctx.thrown;
+            $ctx.next = 22;
+            break;
+          case 22:
+            return $ctx.stop();
+          }
+
+          if (VM.stepping)
+            break;
+        }
+
+        $ctx.frame = new VM.Frame(3, "baz", baz, {
+          "i": i,
+          "j": j
+        }, this, $ctx, $ctx.childFrame);
+      };
+
+      $ctx.next = 9;
+      break;
+    case 9:
+      bar = function bar(i) {
+        var $ctx = bar.$ctx;
+        $ctx.isCompiled = true;
+
+        if ($ctx.frame) {
+          i = $ctx.frame.scope.i;
+          var $child = $ctx.frame.child;
+
+          if ($child) {
+            var $child$ctx = $child.ctx;
+            $child.fn.$ctx = $child$ctx;
+            $child.fn.call($child.thisPtr);
+
+            if ($child$ctx.frame) {
+              $ctx.frame.child = $child$ctx.frame;
+              return;
+            } else {
+              $ctx.frame = null;
+              $ctx.childFrame = null;
+              $ctx[$ctx.resultLoc] = $child$ctx.rval;
+            }
+          } else {
+            if ($ctx.staticBreakpoint)
+              $ctx.next = $ctx.next + 3;
+
+            $ctx.frame = null;
+            $ctx.childFrame = null;
+          }
+        }
+
+        while (1) {
+          if (VM.hasBreakpoints && VM.machineBreaks[4][$ctx.next] !== undefined)
+            break;
+
+          switch ($ctx.next) {
+          case 0:
+            if (!(i > 0)) {
+              $ctx.next = 26;
+              break;
+            }
+
+            $ctx.next = 3;
+            break;
+          case 3:
+            var $t8 = baz.$ctx = VM.getContext();
+            $t8.softReset();
+            var $t9 = baz(i);
+            $ctx.next = 11;
+
+            if ($t8.frame) {
+              $ctx.childFrame = $t8.frame;
+              $ctx.resultLoc = "t7";
+              VM.stepping = true;
+              break;
+            }
+
+            $ctx.t7 = ($t8.isCompiled ? $t8.rval : $t9);
+            VM.releaseContext();
+            break;
+          case 11:
+            $ctx.t12 = i - 1;
+            $ctx.next = 14;
+            break;
+          case 14:
+            var $t11 = bar.$ctx = VM.getContext();
+            $t11.softReset();
+            var $t13 = bar($ctx.t12);
+            $ctx.next = 22;
+
+            if ($t11.frame) {
+              $ctx.childFrame = $t11.frame;
+              $ctx.resultLoc = "t10";
+              VM.stepping = true;
+              break;
+            }
+
+            $ctx.t10 = ($t11.isCompiled ? $t11.rval : $t13);
+            VM.releaseContext();
+            break;
+          case 22:
+            $ctx.rval = $ctx.t7 + $ctx.t10;
+            delete $ctx.thrown;
+            $ctx.next = 30;
+            break;
+          case 26:
+            $ctx.rval = 100;
+            delete $ctx.thrown;
+            $ctx.next = 30;
+            break;
+          case 30:
+            return $ctx.stop();
+          }
+
+          if (VM.stepping)
+            break;
+        }
+
+        $ctx.frame = new VM.Frame(4, "bar", bar, {
+          "i": i
+        }, this, $ctx, $ctx.childFrame);
+      };
+
+      $ctx.next = 12;
+      break;
+    case 12:
+      foo = function foo() {
+        var $ctx = foo.$ctx;
+        $ctx.isCompiled = true;
+
+        if ($ctx.frame) {
+          var $child = $ctx.frame.child;
+
+          if ($child) {
+            var $child$ctx = $child.ctx;
+            $child.fn.$ctx = $child$ctx;
+            $child.fn.call($child.thisPtr);
+
+            if ($child$ctx.frame) {
+              $ctx.frame.child = $child$ctx.frame;
+              return;
+            } else {
+              $ctx.frame = null;
+              $ctx.childFrame = null;
+              $ctx[$ctx.resultLoc] = $child$ctx.rval;
+            }
+          } else {
+            if ($ctx.staticBreakpoint)
+              $ctx.next = $ctx.next + 3;
+
+            $ctx.frame = null;
+            $ctx.childFrame = null;
+          }
+        }
+
+        while (1) {
+          if (VM.hasBreakpoints && VM.machineBreaks[5][$ctx.next] !== undefined)
+            break;
+
+          switch ($ctx.next) {
+          case 0:
+            var $t15 = bar.$ctx = VM.getContext();
+            $t15.softReset();
+            var $t16 = bar(2000);
+            $ctx.next = 8;
+
+            if ($t15.frame) {
+              $ctx.childFrame = $t15.frame;
+              $ctx.resultLoc = "t14";
+              VM.stepping = true;
+              break;
+            }
+
+            $ctx.t14 = ($t15.isCompiled ? $t15.rval : $t16);
+            VM.releaseContext();
+            break;
+          case 8:
+            $ctx.rval = $ctx.t14;
+            delete $ctx.thrown;
+            $ctx.next = 12;
+            break;
+          case 12:
+            return $ctx.stop();
+          }
+
+          if (VM.stepping)
+            break;
+        }
+
+        $ctx.frame = new VM.Frame(5, "foo", foo, {}, this, $ctx, $ctx.childFrame);
+      };
+
+      $ctx.next = 15;
+      break;
+    case 15:
+      var $t20 = foo.$ctx = VM.getContext();
+      $t20.softReset();
+      var $t21 = foo();
+      $ctx.next = 23;
+
+      if ($t20.frame) {
+        $ctx.childFrame = $t20.frame;
+        $ctx.resultLoc = "t19";
+        VM.stepping = true;
+        break;
+      }
+
+      $ctx.t19 = ($t20.isCompiled ? $t20.rval : $t21);
+      VM.releaseContext();
+      break;
+    case 23:
+      var $t18 = console.log.$ctx = VM.getContext();
+      $t18.softReset();
+      var $t22 = console.log($ctx.t19);
+      $ctx.next = 31;
+
+      if ($t18.frame) {
+        $ctx.childFrame = $t18.frame;
+        $ctx.resultLoc = "t17";
+        VM.stepping = true;
+        break;
+      }
+
+      $ctx.t17 = ($t18.isCompiled ? $t18.rval : $t22);
+      VM.releaseContext();
+      break;
+    case 31:
+      return $ctx.stop();
+    }
+
+    if (VM.stepping)
+      break;
+  }
+
+  $ctx.frame = new VM.Frame(0, "$anon1", $anon1, {
+    "quux": quux,
+    "mumble": mumble,
+    "baz": baz,
+    "bar": bar,
+    "foo": foo
+  }, this, $ctx, $ctx.childFrame);
 });

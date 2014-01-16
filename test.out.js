@@ -3,320 +3,329 @@ __debug_sourceURL="test.js";
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
 
-  // cache
-
-  var _frames = [];
-  var frameptr = 0;
-  for(var i=0; i<100000; i++) {
-    _frames.push(new Frame());
-  }
-
-  function getFrame() {
-    return _frames[frameptr++];
-  }
-
-  function releaseFrame() {
-    frameptr--;
-  }
-
   // vm
 
   var findingRoot = false;
 
-  function invokeRoot(fn, self) {
-    fn.$ctx = new Context();
+  function invokeRoot(fn) {
+    VM.state = EXECUTING;
 
-    var frame = getFrame();
-    frame.fn = fn;
-    frame.context = fn.$ctx;
-    frame.invokeMeta = ['top-level', null, fn];
-    frame.name = frame.invokeMeta[0];
-    frame.machineId = fn.$machineId;
-    frame.savedNext = null;
-    frame.parent = null;
-
-    rootFrame = curFrame = frame;
-    rootFrame.run();
+    var ctx = fn.$ctx = getContext();
+    ctx.softReset();
+    fn();
+    checkStatus(ctx);
   }
 
-  function invokeFunction(name, id, fn, self) {
-    var frame = getFrame();
-    frame.context = new Context();
-    frame.fn = fn;
-    frame.name = name;
-    frame.machineId = id;
-    frame.savedNext = null;
+  function checkStatus(ctx) {
+    if(ctx.frame) {
+      ctx.frame.name = 'top-level';
 
-    if(!rootFrame && !findingRoot) {
-      // no root frame means that it's being called from outside
-      // our control, most likely something async. simply make
-      // this the root frame!! this makes ALL FUNCTIONS
-      // INTEROPERABLE! without having to shim anything. we
-      // could even have hooks for when async is entered/exited
-      // and create neat debugging tools for that.
+      // machine was paused
+      VM.state = VM.SUSPENDED;
+      rootFrame = ctx.frame;
 
-      rootFrame = curFrame = frame;
-      rootFrame.run();
+      if(VM.error) {
+        VM.onError && VM.onError(VM.error);
+        VM.error = null;
+      }
+      else if(VM.isStepping()) {
+        VM.onStep && VM.onStep();
+      }
+      else {
+        VM.onBreakpoint && VM.onBreakpoint();
+      }
+
+      VM.stepping = true;
     }
     else {
-      return frame;
+      if(VM.onFinish) {
+        setTimeout(VM.onFinish, 0);
+      }
+
+      VM.state = VM.IDLE;
     }
   }
 
-  global.invokeFunction = invokeFunction;
-  global.invokeRoot = invokeRoot;
-  var VM = global.VM = {};
+  function getTopFrame(frame) {
+    var top = frame;
+    while(top.child) {
+      top = top.child;
+    }
+    return top;
+  }
 
+  var VM = global.VM = {};
   if(typeof exports !== 'undefined') {
-    exports.invokeFunction = invokeFunction;
-    exports.invokeRoot = invokeRoot;
+    exports.VM = VM;
   }
 
   var originalSrc;
   var debugInfo;
+  var curStack;
+
+  VM.Frame = Frame;
+  VM.getContext = getContext;
+  VM.releaseContext = releaseContext;
+  VM.invokeRoot = invokeRoot;
+  VM.getTopFrame = function() {
+    return getTopFrame(rootFrame);
+  };
+
+  VM.getFrameOffset = function(i) {
+    // TODO: this is really annoying, but it works for now. have to do
+    // two passes
+    var top = rootFrame;
+    var count = 0;
+    while(top.child) {
+      top = top.child;
+      count++;
+    }
+
+    var depth = count - i;
+    top = rootFrame;
+    count = 0;
+    while(top.child && count < depth) {
+      top = top.child;
+      count++;
+    }
+
+    return top;
+  };
 
   VM.setDebugInfo = function(info) {
     debugInfo = info;
+    VM.machineBreaks = new Array(debugInfo.length);
+
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      VM.machineBreaks[i] = [];
+    }
   };
 
-  VM.getLoc = function() {
-    return curFrame && curFrame.getLoc();
+  VM.getRootFrame = function() {
+    return rootFrame;
   };
 
-  VM.getCurrentFrame = function() {
-    return curFrame;
+  VM.run = function() {
+    if(!rootFrame) return;
+
+    // We need to get past this instruction that has a breakpoint, so
+    // turn off breakpoints and step past it, then turn them back on
+    // again and execute normally
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+
+    var nextFrame = rootFrame.ctx.frame;
+    VM.hasBreakpoints = true;
+    VM.stepping = false;
+    nextFrame.restore();
+    checkStatus(nextFrame.ctx);
+  };
+
+  VM.step = function() {
+    if(!rootFrame) return;
+
+    VM.stepping = true;
+    VM.hasBreakpoints = false;
+    rootFrame.restore();
+    VM.hasBreakpoints = true;
+
+    checkStatus(rootFrame.ctx);
+
+    // rootFrame now points to the new stack
+    var top = getTopFrame(rootFrame);
+
+    if(VM.state === VM.SUSPENDED &&
+       top.ctx.next === debugInfo[top.machineId].finalLoc) {
+      // if it's waiting to simply return a value, go ahead and run
+      // that step so the user doesn't have to step through each frame
+      // return
+      VM.step();
+    }
   };
 
   VM.evaluate = function(expr) {
     if(expr === '$_') {
       return lastEval;
     }
-    else if(curFrame) {
-      lastEval = curFrame.evaluate(expr);
+    else if(rootFrame) {
+      var top = VM.getTopFrame();
+      var res = top.evaluate(expr);
+
+      // switch frames to get any updated data
+      var parent = VM.getFrameOffset(1);
+      parent.child = res.frame;
+      // fix the self-referencing pointer
+      res.frame.ctx.frame = res.frame;
+
+      lastEval = res.result;
       return lastEval;
     }
   };
 
-  VM.reset = function(hard) {
-    VM.state = IDLE;
-    curFrame = null;
+  VM.reset = function() {
     rootFrame = null;
-
-    if(hard) {
-      debugInfo = null;
-    }
+    debugInfo = null;
+    VM.state = IDLE;
+    VM.machineBreaks = [];
+    VM.stepping = false;
   };
 
-  var UndefinedValue = Object.create(null);
+  VM.isStepping = function() {
+    return VM.stepping;
+  };
+
+  VM.getLocation = function() {
+    if(!rootFrame) return;
+
+    var top = VM.getTopFrame();
+    return debugInfo[top.machineId].locs[top.ctx.next];
+  };
+
+  VM.toggleBreakpoint = function(internalLoc) {
+    if(!internalLoc) return;
+
+    var machineId = internalLoc.machineId;
+    var locId = internalLoc.locId;
+
+    if(VM.machineBreaks[machineId][locId] === undefined) {
+      VM.hasBreakpoints = true;
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = true;
+    }
+    else {
+      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = undefined;
+    }
+
+    return true;
+  };
+
+  VM.lineToInternalLoc = function(line) {
+    for(var i=0, l=debugInfo.length; i<l; i++) {
+      var locs = debugInfo[i].locs;
+      var keys = Object.keys(locs);
+
+      for(var cur=0, len=keys.length; cur<len; cur++) {
+        var loc = locs[keys[cur]];
+        if(loc.start.line === line) {
+          return {
+            machineId: i,
+            locId: keys[cur]
+          };
+        }
+      }
+    }
+
+    return null;
+  };
+
+  // TODO: I'm not sure we need this anymore. It should be
+  // deterministic when a function returns by other various
+  // heuristics.
+  // var UndefinedValue = Object.create(null, {
+  //   toString: function() { return 'undefined'; }
+  // });
+
   var rootFrame;
-  var curFrame;
   var lastEval;
 
-  // Be aware: getDispatchLoop in emit.js hardcodes the value 3 to
-  // represent VM.EXECUTING
   var IDLE = VM.IDLE = 1;
   var SUSPENDED = VM.SUSPENDED = 2;
   var EXECUTING = VM.EXECUTING = 3;
 
-  function Frame() {
+  // frame
+
+  function Frame(machineId, name, fn, scope, outerScope,
+                 thisPtr, ctx, child) {
+    this.machineId = machineId;
+    this.name = name;
+    this.fn = fn;
+    this.scope = scope;
+    this.outerScope = outerScope;
+    this.thisPtr = thisPtr;
+    this.ctx = ctx;
+    this.child = child;
   }
 
-  // function Frame(name, machineId, fn, self) {
-  // }
-
-  Frame.prototype.run = function() {
-    VM.state = EXECUTING;
-    this.context.state = EXECUTING;
-
-    while(VM.state === EXECUTING) {
-      curFrame.invoke();
-    }
-  };
-
-  Frame.prototype.invoke = function() {
-    var context = this.context;
-    var prevState = VM.state;
-    var fn = this.fn;
-    var invokeMeta = this.invokeMeta;
-    this.savedNext = context.next;
-
-    // Call the function
-    //
-    // Hard-code a lot of special cases for good performance.
-    // `invokeMeta` is an array containing call information with the
-    // following indexes:
-    // 0: function name
-    // 1: `this` context
-    // 2: function instance
-    // 3-n: arguments
-
-    var thisCtx = invokeMeta[1];
-    var nargs = invokeMeta.length - 3;
-    var res;
-
-    if(thisCtx) {
-      switch(nargs) {
-      case 0:
-        res = fn.call(thisCtx); break;
-      case 1:
-        res = fn.call(thisCtx, invokeMeta[3]); break;
-      case 2:
-        res = fn.call(thisCtx, invokeMeta[3], invokeMeta[4]); break;
-      default:
-        res = fn.apply(thisCtx, invokeMeta.slice(3));
-      }
-    }
-    else {
-      switch(nargs) {
-      case 0:
-        res = fn(); break;
-      case 1:
-        res = fn(target[3]); break;
-      case 2:
-        res = fn(target[3], target[4]); break;
-      default:
-        res = fn.apply(null, target.slice(3));
-      }
-    }
-
-    // Handle the current state
-
-    if(context.done && !this.parent) {
-      VM.reset();
-    }
-    else if(context.invoke) {
-      var meta = context.invoke;
-      context.invoke = null;
-
-        console.log(meta);
-      var fnInst = meta[2];
-      fnInst.$ctx = new Context();
-
-      var frame = getFrame();
-      frame.fn = fnInst;
-      frame.context = fn.$ctx;
-      frame.invokeMeta = meta;
-      frame.name = meta[0];
-      frame.machineId = fn.$machineId;
-      frame.savedNext = null;
-
-      frame.parent = this;
-      curFrame = frame;
-      curFrame.setState(context.state);
-    }
-    else if(context.rval !== UndefinedValue) {
-      // something was returned
-      var val = context.rval;
-      context.rval = UndefinedValue;
-      curFrame = this.parent;
-      curFrame.return(val);
-      releaseFrame();
-    }
-    else if(!context.isCompiled) {
-      // we called a native function that wasn't compiled by us, so it
-      // just returned a value like normal
-      curFrame.return(res);
-      releaseFrame();
-    }
-    else if(!context.done && context.state === SUSPENDED) {
-      VM.state = VM.SUSPENDED;
-    }
-
-    if(VM.state === SUSPENDED) {
-      if(curFrame === rootFrame &&
-         !context.done &&
-         context.next === this.getFinalLoc()) {
-        // jump to the final location and end the program,
-        // regardless of any stepping
-        this.invoke();
-        return;
-      }
-
-      if(prevState !== VM.state) {
-        VM.onBreakpoint && VM.onBreakpoint();
-      }
-      else {
-        VM.onStep && VM.onStep();
-      }
-    }
-    else if(VM.state === IDLE && VM.onFinish) {
-      VM.onFinish();
-    }
-  };
-
-  Frame.prototype.step = function() {
-    curFrame.invoke();
-  };
-
-  Frame.prototype.return = function(val) {
-    this.context.returned = val;
+  Frame.prototype.restore = function() {
+    this.fn.$ctx = this.ctx;
+    this.fn.call(this.thisPtr);
   };
 
   Frame.prototype.evaluate = function(expr) {
-    var savedLoc = this.context.next;
-    var evalLoc = this.getEvalLoc();
+    VM.evalArg = expr;
+    VM.error = null;
+    VM.stepping = true;
 
-    if(!evalLoc) {
-      throw new Error("cannot eval: debug information not available");
-    }
+    // Convert this frame into a childless frame that will just
+    // execute the eval instruction
+    var savedChild = this.child;
+    var ctx = new Context();
+    ctx.next = -1;
+    ctx.frame = this;
+    this.child = null;
 
-    this.context.next = evalLoc;
-    try {
-      var ret = fn.call(self, this.context, expr);
-    }
-    finally {
-      this.context.next = savedLoc;
-    }
+    this.fn.$ctx = ctx;
+    this.fn.call(this.thisPtr);
 
-    return ret;
-  };
+    // Restore the stack
+    this.child = savedChild;
 
-  Frame.prototype.setState = function(state) {
-    this.context.state = state;
-  };
-
-  Frame.prototype.getStack = function() {
-    if(this.parent) {
-      var frame = this.parent;
-      var stack = [[this.name, this.getLoc()]];
-
-      while(frame.parent) {
-        stack.push([frame.name, frame.getSavedLoc()]);
-        frame = frame.parent;
-      }
-
-      return stack.reverse();
+    if(VM.error) {
+      var err = VM.error;
+      VM.error = null;
+      throw err;
     }
     else {
-      return [];
+      var newFrame = ctx.frame;
+      newFrame.child = this.child;
+      newFrame.ctx = this.ctx;
+
+      return {
+        result: ctx.rval,
+        frame: newFrame
+      };
     }
   };
 
-  Frame.prototype.getLoc = function() {
-    return debugInfo[this.machineId].locs[this.context.next];
+  Frame.prototype.stackEach = function(func) {
+    if(this.child) {
+      this.child.stackEach(func);
+    }
+    func(this);
   };
 
-  Frame.prototype.getSavedLoc = function() {
-    return debugInfo[this.machineId].locs[this.savedNext];
+  Frame.prototype.stackMap = function(func) {
+    var res;
+    if(this.child) {
+      res = this.child.stackMap(func);
+    }
+    else {
+      res = [];
+    }
+
+    res.push(func(this));
+    return res;
   };
 
-  Frame.prototype.getFinalLoc = function() {
-    return debugInfo[this.machineId].finalLoc;
+  Frame.prototype.stackReduce = function(func, acc) {
+    if(this.child) {
+      acc = this.child.stackReduce(func, acc);
+    }
+
+    return func(acc, this);
   };
 
-  Frame.prototype.getEvalLoc = function() {
-    return debugInfo[this.machineId].evalLoc;
-  };
+  Frame.prototype.getExpression = function(src) {
+    var loc = debugInfo[this.machineId].locs[this.ctx.next];
 
-  Frame.prototype.getExpression = function() {
-    //console.log(this.machineId, context.debugIdx || context.next);
-
-    var loc = this.getLoc();
-    if(loc && originalSrc) {
-      var line = originalSrc[loc.start.line - 1];
+    if(loc && src) {
+      var line = src.split('\n')[loc.start.line - 1];
       return line.slice(loc.start.column, loc.end.column);
     }
+    return '';
   };
+
+  // context
 
   function Context() {
     this.reset();
@@ -325,23 +334,34 @@ __debug_sourceURL="test.js";
   Context.prototype = {
     constructor: Context,
 
-    reset: function() {
-      this.next = 0;
-      this.sent = void 0;
-      this.returned = void 0;
-      this.state = EXECUTING;
-      this.rval = UndefinedValue;
-      this.tryStack = [];
-      this.done = false;
-      this.delegate = null;
+    reset: function(initialState) {
+      this.softReset(initialState);
 
-      // Pre-initialize at least 20 temporary variables to enable hidden
+      // Pre-initialize at least 30 temporary variables to enable hidden
       // class optimizations for simple generators.
       for (var tempIndex = 0, tempName;
-           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 20;
+           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 30;
            ++tempIndex) {
         this[tempName] = null;
       }
+    },
+
+    softReset: function(initialState) {
+      this.next = 0;
+      this.lastNext = 0;
+      this.sent = void 0;
+      this.returned = void 0;
+      this.state = initialState || EXECUTING;
+      this.rval = void 0;
+      this.tryStack = [];
+      this.done = false;
+      this.delegate = null;
+      this.frame = null;
+      this.childFrame = null;
+      this.isCompiled = false;
+
+      this.staticBreakpoint = false;
+      this.stepping = false;
     },
 
     stop: function() {
@@ -353,9 +373,11 @@ __debug_sourceURL="test.js";
         throw thrown;
       }
 
-      if(this.rval === UndefinedValue) {
-        this.rval = undefined;
-      }
+      // if(this.rval === UndefinedValue) {
+      //   this.rval = undefined;
+      // }
+
+      // return this.rval;
     },
 
     keys: function(object) {
@@ -449,866 +471,431 @@ __debug_sourceURL="test.js";
       return info.value;
     }
   };
+
+  // cache
+
+  var cacheSize = 30000;
+  var _contexts = new Array(cacheSize);
+  var contextptr = 0;
+  for(var i=0; i<cacheSize; i++) {
+    _contexts[i] = new Context();
+  }
+
+  function getContext() {
+    if(contextptr < cacheSize) {
+      return _contexts[contextptr++];
+    }
+    else {
+      return new Context();
+    }
+  }
+
+  function releaseContext() {
+    contextptr--;
+  }
 }).call(this, (function() { return this; })());
 
-VM.setDebugInfo({
-    "1": {
-        "finalLoc": 21,
+VM.setDebugInfo([{
+  "finalLoc": 33,
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 2,
-                    "column": 0
-                },
+  "locs": {
+    "0": {
+      "start": {
+        "line": 2,
+        "column": 0
+      },
 
-                "end": {
-                    "line": 9,
-                    "column": 1
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 2,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 9,
-                    "column": 1
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 11,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 17,
-                    "column": 1
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 11,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 17,
-                    "column": 1
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 19,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 27,
-                    "column": 1
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 19,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 27,
-                    "column": 1
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 29,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 34,
-                    "column": 1
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 29,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 34,
-                    "column": 1
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 36,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 38,
-                    "column": 1
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 36,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 38,
-                    "column": 1
-                }
-            },
-
-            "15": {
-                "start": {
-                    "line": 40,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 40,
-                    "column": 17
-                }
-            },
-
-            "18": {
-                "start": {
-                    "line": 40,
-                    "column": 0
-                },
-
-                "end": {
-                    "line": 40,
-                    "column": 18
-                }
-            }
-        }
+      "end": {
+        "line": 6,
+        "column": 1
+      }
     },
 
-    "2": {
-        "finalLoc": 20,
+    "1": {
+      "start": {
+        "line": 2,
+        "column": 0
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 3,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 3,
-                    "column": 13
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 3,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 3,
-                    "column": 13
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 4,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 4,
-                    "column": 28
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 4,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 4,
-                    "column": 28
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 5,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 20
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 5,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 20
-                }
-            },
-
-            "8": {
-                "start": {
-                    "line": 5,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 5,
-                    "column": 13
-                }
-            },
-
-            "11": {
-                "start": {
-                    "line": 6,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 6,
-                    "column": 19
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 6,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 6,
-                    "column": 19
-                }
-            },
-
-            "16": {
-                "start": {
-                    "line": 8,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 8,
-                    "column": 13
-                }
-            }
-        }
+      "end": {
+        "line": 6,
+        "column": 1
+      }
     },
 
     "3": {
-        "finalLoc": 24,
+      "start": {
+        "line": 8,
+        "column": 8
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 12,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 12,
-                    "column": 14
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 12,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 12,
-                    "column": 14
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 13,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 15
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 13,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 15
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 13,
-                    "column": 17
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 20
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 14,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 14,
-                    "column": 13
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 14,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 14,
-                    "column": 13
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 13,
-                    "column": 22
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 25
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 13,
-                    "column": 22
-                },
-
-                "end": {
-                    "line": 13,
-                    "column": 25
-                }
-            },
-
-            "17": {
-                "start": {
-                    "line": 16,
-                    "column": 11
-                },
-
-                "end": {
-                    "line": 16,
-                    "column": 18
-                }
-            },
-
-            "20": {
-                "start": {
-                    "line": 16,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 16,
-                    "column": 19
-                }
-            }
-        }
+      "end": {
+        "line": 8,
+        "column": 20
+      }
     },
 
-    "4": {
-        "finalLoc": 17,
+    "12": {
+      "start": {
+        "line": 8,
+        "column": 4
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 20,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 20,
-                    "column": 14
-                }
-            },
-
-            "1": {
-                "start": {
-                    "line": 20,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 20,
-                    "column": 14
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 22,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 22,
-                    "column": 13
-                }
-            },
-
-            "4": {
-                "start": {
-                    "line": 22,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 22,
-                    "column": 13
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 23,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 23,
-                    "column": 11
-                }
-            },
-
-            "7": {
-                "start": {
-                    "line": 23,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 23,
-                    "column": 11
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 24,
-                    "column": 12
-                },
-
-                "end": {
-                    "line": 24,
-                    "column": 17
-                }
-            },
-
-            "10": {
-                "start": {
-                    "line": 26,
-                    "column": 11
-                },
-
-                "end": {
-                    "line": 26,
-                    "column": 20
-                }
-            },
-
-            "13": {
-                "start": {
-                    "line": 26,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 26,
-                    "column": 21
-                }
-            }
-        }
+      "end": {
+        "line": 8,
+        "column": 20
+      }
     },
 
-    "5": {
-        "finalLoc": 20,
+    "13": {
+      "start": {
+        "line": 8,
+        "column": 4
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 30,
-                    "column": 7
-                },
-
-                "end": {
-                    "line": 30,
-                    "column": 12
-                }
-            },
-
-            "3": {
-                "start": {
-                    "line": 31,
-                    "column": 15
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 24
-                }
-            },
-
-            "6": {
-                "start": {
-                    "line": 31,
-                    "column": 31
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 36
-                }
-            },
-
-            "9": {
-                "start": {
-                    "line": 31,
-                    "column": 27
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 37
-                }
-            },
-
-            "12": {
-                "start": {
-                    "line": 31,
-                    "column": 8
-                },
-
-                "end": {
-                    "line": 31,
-                    "column": 38
-                }
-            },
-
-            "16": {
-                "start": {
-                    "line": 33,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 33,
-                    "column": 13
-                }
-            }
-        }
+      "end": {
+        "line": 8,
+        "column": 20
+      }
     },
 
-    "6": {
-        "finalLoc": 7,
+    "15": {
+      "start": {
+        "line": 9,
+        "column": 12
+      },
 
-        "locs": {
-            "0": {
-                "start": {
-                    "line": 37,
-                    "column": 11
-                },
+      "end": {
+        "line": 9,
+        "column": 17
+      }
+    },
 
-                "end": {
-                    "line": 37,
-                    "column": 21
-                }
-            },
+    "24": {
+      "start": {
+        "line": 9,
+        "column": 0
+      },
 
-            "3": {
-                "start": {
-                    "line": 37,
-                    "column": 4
-                },
-
-                "end": {
-                    "line": 37,
-                    "column": 22
-                }
-            }
-        }
+      "end": {
+        "line": 9,
+        "column": 18
+      }
     }
-});
+  }
+}, {
+  "finalLoc": 3,
 
-invokeRoot(function $anon1() {
-    var quux, mumble, baz, bar, foo;
-    var $ctx = $anon1.$ctx;
-    $ctx.isCompiled = true;
+  "locs": {
+    "0": {
+      "start": {
+        "line": 3,
+        "column": 2
+      },
 
-    do switch ($ctx.next) {
-    case 0:
-        quux = function quux(i) {
-            var z, obj, k;
-            var $ctx = quux.$ctx;
-            $ctx.isCompiled = true;
+      "end": {
+        "line": 5,
+        "column": 3
+      }
+    },
 
-            do switch ($ctx.next) {
-            case 0:
-                z = 1;
-                $ctx.next = 3;
-                return;
-            case 3:
-                obj = {
-                    x: 1,
-                    y: 2
+    "1": {
+      "start": {
+        "line": 3,
+        "column": 2
+      },
+
+      "end": {
+        "line": 5,
+        "column": 3
+      }
+    }
+  }
+}, {
+  "finalLoc": 4,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 4,
+        "column": 4
+      },
+
+      "end": {
+        "line": 4,
+        "column": 17
+      }
+    }
+  }
+}]);
+
+VM.invokeRoot(function $anon1() {
+  var foo, f;
+  var $ctx = $anon1.$ctx;
+
+  if ($ctx === undefined)
+    return VM.invokeRoot($anon1);
+
+  $ctx.isCompiled = true;
+
+  try {
+    if ($ctx.frame) {
+      foo = $ctx.frame.scope.foo;
+      f = $ctx.frame.scope.f;
+      var $child = $ctx.frame.child;
+
+      if ($child) {
+        var $child$ctx = $child.ctx;
+        $child.fn.$ctx = $child$ctx;
+        $child.fn.call($child.thisPtr);
+
+        if ($child$ctx.frame) {
+          $ctx.frame.child = $child$ctx.frame;
+          return;
+        } else {
+          $ctx.frame = null;
+          $ctx.childFrame = null;
+          $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+          if (VM.stepping)
+            throw null;
+        }
+      } else {
+        if ($ctx.staticBreakpoint)
+          $ctx.next = $ctx.next + 3;
+
+        $ctx.frame = null;
+        $ctx.childFrame = null;
+      }
+    } else if (VM.stepping)
+      throw null;
+
+    while (1) {
+      if (VM.hasBreakpoints && VM.machineBreaks[0][$ctx.next] !== undefined)
+        break;
+
+      switch ($ctx.next) {
+      case 0:
+        foo = function foo(x, y, z) {
+          var bar;
+          var $ctx = foo.$ctx;
+
+          if ($ctx === undefined)
+            return VM.invokeRoot(foo);
+
+          $ctx.isCompiled = true;
+
+          try {
+            if ($ctx.frame) {
+              x = $ctx.frame.scope.x;
+              y = $ctx.frame.scope.y;
+              z = $ctx.frame.scope.z;
+              bar = $ctx.frame.scope.bar;
+              var $child = $ctx.frame.child;
+
+              if ($child) {
+                var $child$ctx = $child.ctx;
+                $child.fn.$ctx = $child$ctx;
+                $child.fn.call($child.thisPtr);
+
+                if ($child$ctx.frame) {
+                  $ctx.frame.child = $child$ctx.frame;
+                  return;
+                } else {
+                  $ctx.frame = null;
+                  $ctx.childFrame = null;
+                  $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                  if (VM.stepping)
+                    throw null;
+                }
+              } else {
+                if ($ctx.staticBreakpoint)
+                  $ctx.next = $ctx.next + 3;
+
+                $ctx.frame = null;
+                $ctx.childFrame = null;
+              }
+            } else if (VM.stepping)
+              throw null;
+
+            while (1) {
+              if (VM.hasBreakpoints && VM.machineBreaks[1][$ctx.next] !== undefined)
+                break;
+
+              switch ($ctx.next) {
+              case 0:
+                bar = function bar(w) {
+                  var $ctx = bar.$ctx;
+
+                  if ($ctx === undefined)
+                    return VM.invokeRoot(bar);
+
+                  $ctx.isCompiled = true;
+
+                  try {
+                    if ($ctx.frame) {
+                      w = $ctx.frame.scope.w;
+                      var $child = $ctx.frame.child;
+
+                      if ($child) {
+                        var $child$ctx = $child.ctx;
+                        $child.fn.$ctx = $child$ctx;
+                        $child.fn.call($child.thisPtr);
+
+                        if ($child$ctx.frame) {
+                          $ctx.frame.child = $child$ctx.frame;
+                          return;
+                        } else {
+                          $ctx.frame = null;
+                          $ctx.childFrame = null;
+                          $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                          if (VM.stepping)
+                            throw null;
+                        }
+                      } else {
+                        if ($ctx.staticBreakpoint)
+                          $ctx.next = $ctx.next + 3;
+
+                        $ctx.frame = null;
+                        $ctx.childFrame = null;
+                      }
+                    } else if (VM.stepping)
+                      throw null;
+
+                    while (1) {
+                      if (VM.hasBreakpoints && VM.machineBreaks[2][$ctx.next] !== undefined)
+                        break;
+
+                      switch ($ctx.next) {
+                      case 0:
+                        $ctx.rval = x + w;
+                        delete $ctx.thrown;
+                        $ctx.next = 4;
+                        break;
+                      case 4:
+                        return $ctx.stop();
+                      case -1:
+                        $ctx.rval = eval(VM.evalArg);
+                      }
+
+                      if (VM.stepping)
+                        break;
+                    }
+                  }catch (e) {
+                    VM.error = e;
+                  }
+
+                  $ctx.frame = new VM.Frame(2, "bar", bar, {
+                    "w": w
+                  }, ["x", "y", "z", "bar", "foo", "f"], this, $ctx, $ctx.childFrame);
                 };
 
-                $ctx.next = 6;
-                return;
-            case 6:
-                $ctx.t0 = $ctx.keys(obj);
-            case 7:
-                if (!$ctx.t0.length) {
-                    $ctx.next = 16;
-                    break;
-                }
-
-                k = $ctx.t0.pop();
-                $ctx.next = 11;
+                $ctx.next = 3;
                 break;
-            case 11:
-                z *= obj[k];
-                $ctx.next = 7;
-                return;
-            case 14:
-                $ctx.next = 7;
-                break;
-            case 16:
-                $ctx.rval = z;
-                delete $ctx.thrown;
-                $ctx.next = 20;
-                break;
-            case 20:
+              case 3:
                 return $ctx.stop();
-            } while ($ctx.state === 3);
+              case -1:
+                $ctx.rval = eval(VM.evalArg);
+              }
+
+              if (VM.stepping)
+                break;
+            }
+          }catch (e) {
+            VM.error = e;
+          }
+
+          $ctx.frame = new VM.Frame(1, "foo", foo, {
+            "x": x,
+            "y": y,
+            "z": z,
+            "bar": bar
+          }, ["foo", "f"], this, $ctx, $ctx.childFrame);
         };
 
         $ctx.next = 3;
-        return;
-    case 3:
-        mumble = function mumble(i) {
-            var z, j;
-            var $ctx = mumble.$ctx;
-            $ctx.isCompiled = true;
+        break;
+      case 3:
+        var $t1 = VM.getContext();
 
-            do switch ($ctx.next) {
-            case 0:
-                z = 10;
-                $ctx.next = 3;
-                return;
-            case 3:
-                j = 0;
-                $ctx.next = 6;
-                return;
-            case 6:
-                if (!(j < i)) {
-                    $ctx.next = 17;
-                    break;
-                }
+        if (foo)
+          foo.$ctx = $t1;
 
-                $ctx.next = 9;
-                break;
-            case 9:
-                z = j;
-                $ctx.next = 12;
-                return;
-            case 12:
-                j++;
-                $ctx.next = 6;
-                return;
-            case 15:
-                $ctx.next = 6;
-                break;
-            case 17:
-                $ctx.invoke = ["quux", null, quux, z];
-                $ctx.next = 20;
-                return;
-            case 20:
-                $ctx.rval = $ctx.returned;
-                delete $ctx.thrown;
-                $ctx.next = 24;
-                break;
-            case 24:
-                return $ctx.stop();
-            } while ($ctx.state === 3);
-        };
-
-        $ctx.next = 6;
-        return;
-    case 6:
-        baz = function baz(i) {
-            var j;
-            var $ctx = baz.$ctx;
-            $ctx.isCompiled = true;
-
-            do switch ($ctx.next) {
-            case 0:
-                j = 10;
-                $ctx.next = 3;
-                return;
-            case 3:
-                j = 5;
-                $ctx.next = 6;
-                return;
-            case 6:
-                i--;
-                $ctx.next = 9;
-                return;
-            case 9:
-                if (i > 0) {
-                    $ctx.next = 3;
-                    break;
-                }
-            case 10:
-                $ctx.invoke = ["mumble", null, mumble, j];
-                $ctx.next = 13;
-                return;
-            case 13:
-                $ctx.rval = $ctx.returned;
-                delete $ctx.thrown;
-                $ctx.next = 17;
-                break;
-            case 17:
-                return $ctx.stop();
-            } while ($ctx.state === 3);
-        };
-
-        $ctx.next = 9;
-        return;
-    case 9:
-        bar = function bar(i) {
-            var $ctx = bar.$ctx;
-            $ctx.isCompiled = true;
-
-            do switch ($ctx.next) {
-            case 0:
-                if (!(i > 0)) {
-                    $ctx.next = 16;
-                    break;
-                }
-
-                $ctx.next = 3;
-                break;
-            case 3:
-                $ctx.invoke = ["mumble", null, mumble, i];
-                $ctx.next = 6;
-                return;
-            case 6:
-                $ctx.t1 = i - 1;
-                $ctx.next = 9;
-                break;
-            case 9:
-                $ctx.invoke = ["bar", null, bar, $ctx.t1];
-                $ctx.next = 12;
-                return;
-            case 12:
-                $ctx.rval = $ctx.returned + $ctx.returned;
-                delete $ctx.thrown;
-                $ctx.next = 20;
-                break;
-            case 16:
-                $ctx.rval = 0;
-                delete $ctx.thrown;
-                $ctx.next = 20;
-                break;
-            case 20:
-                return $ctx.stop();
-            } while ($ctx.state === 3);
-        };
-
+        $t1.softReset();
+        var $t2 = foo(1, 2, 3);
         $ctx.next = 12;
-        return;
-    case 12:
-        foo = function foo2() {
-            var $ctx = foo2.$ctx;
-            $ctx.isCompiled = true;
 
-            do switch ($ctx.next) {
-            case 0:
-                $ctx.invoke = ["bar", null, bar, 10000];
-                $ctx.next = 3;
-                return;
-            case 3:
-                $ctx.rval = $ctx.returned;
-                delete $ctx.thrown;
-                $ctx.next = 7;
-                break;
-            case 7:
-                return $ctx.stop();
-            } while ($ctx.state === 3);
-        };
+        if ($t1.frame) {
+          $ctx.childFrame = $t1.frame;
+          $ctx.resultLoc = "t0";
+          VM.stepping = true;
+          break;
+        }
 
+        $ctx.t0 = ($t1.isCompiled ? $t1.rval : $t2);
+        VM.releaseContext();
+        break;
+      case 12:
+        f = $ctx.t0;
         $ctx.next = 15;
-        return;
-    case 15:
-        console.error(foo);
-        $ctx.invoke = ["foo", null, foo];
-        $ctx.next = 18;
-        return;
-    case 18:
-        $ctx.invoke = ["console.log", console, console.log, $ctx.returned];
-        $ctx.next = 21;
-        return;
-    case 21:
+        break;
+      case 15:
+        var $t6 = VM.getContext();
+
+        if (f)
+          f.$ctx = $t6;
+
+        $t6.softReset();
+        var $t7 = f(20);
+        $ctx.next = 24;
+
+        if ($t6.frame) {
+          $ctx.childFrame = $t6.frame;
+          $ctx.resultLoc = "t5";
+          VM.stepping = true;
+          break;
+        }
+
+        $ctx.t5 = ($t6.isCompiled ? $t6.rval : $t7);
+        VM.releaseContext();
+        break;
+      case 24:
+        var $t4 = VM.getContext();
+
+        if (console.log)
+          console.log.$ctx = $t4;
+
+        $t4.softReset();
+        var $t8 = console.log($ctx.t5);
+        $ctx.next = 33;
+
+        if ($t4.frame) {
+          $ctx.childFrame = $t4.frame;
+          $ctx.resultLoc = "t3";
+          VM.stepping = true;
+          break;
+        }
+
+        $ctx.t3 = ($t4.isCompiled ? $t4.rval : $t8);
+        VM.releaseContext();
+        break;
+      case 33:
         return $ctx.stop();
-    } while ($ctx.state === 3);
+      case -1:
+        $ctx.rval = eval(VM.evalArg);
+      }
+
+      if (VM.stepping)
+        break;
+    }
+  }catch (e) {
+    VM.error = e;
+  }
+
+  $ctx.frame = new VM.Frame(0, "$anon1", $anon1, {
+    "foo": foo,
+    "f": f
+  }, [], this, $ctx, $ctx.childFrame);
 }, this);

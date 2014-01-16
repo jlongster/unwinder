@@ -1,0 +1,9 @@
+
+function foo(x, y, z) {
+  return function(w) {
+    z = 10;
+    return w + z;
+  }
+}
+
+console.log(foo(1,2,3)(10));

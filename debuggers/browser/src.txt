@@ -1,15 +1,9 @@
 
-function foo(x) {
-  console.log(Math.floor(Math.random()*255));
-
-  if(x > 0) {
-    bar(x - 1);
-  }
+function foo(x, y, z) {
+  function bar(w) {
+    return x + w;
+  } 
 }
 
-function bar(x) {
-  foo(x);
-}
-
-debugger;
-bar(10);
+var f = foo(1, 2, 3);
+console.log(f(20));
