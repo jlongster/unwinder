@@ -472,6 +472,10 @@ Ep.getDispatchLoop = function(funcName, varNames, scope) {
 
   cases.push(
     b.switchCase(this.finalLoc, [
+      // Clean up the function
+      self.assign(self.getProperty(funcName, '$ctx'),
+                  b.identifier('undefined')),
+
       // This will check/clear both context.thrown and context.rval.
       b.returnStatement(
         b.callExpression(this.contextProperty("stop"), [])
@@ -637,7 +641,11 @@ Ep.getDispatchLoop = function(funcName, varNames, scope) {
            self.contextProperty('childFrame')]
         )
       )
-    )];
+    ),
+
+    // clean up the function
+    self.assign(self.getProperty(funcName, '$ctx'), b.identifier('undefined'))
+  ];
 };
 
 // See comment above re: alreadyEnded.
@@ -1294,7 +1302,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
 
     self.emit(
       withLoc(self.declareVar(
-        curContextTmp.name, 
+        curContextTmp.name,
         b.callExpression(self.getProperty('VM', 'getContext'), [])
       ), path.node.loc)
     );
@@ -1313,7 +1321,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
     ), true);
 
     var res = self.makeTempId();
-    
+
     self.emit(self.declareVar(res.name, b.callExpression(newCallee, args)),
               true);
     self.emitAssign(self.contextProperty("next"), after);

@@ -6,21 +6,31 @@
   var findingRoot = false;
 
   function invokeRoot(fn) {
+    // hack: if there's no debug info, there's no client connected to
+    // this running instance (which could be invoked from an async
+    // event like setTimeout). ignore it.
+    if(!debugInfo) {
+      return;
+    }
+
     VM.state = EXECUTING;
 
     var ctx = fn.$ctx = getContext();
     ctx.softReset();
     fn();
     checkStatus(ctx);
+
+    // clean up the function, since this property is used to tell if
+    // we are inside our VM or not
+    delete fn.$ctx;
   }
 
   function checkStatus(ctx) {
     if(ctx.frame) {
-      ctx.frame.name = 'top-level';
-
       // machine was paused
       VM.state = VM.SUSPENDED;
       rootFrame = ctx.frame;
+      rootFrame.name = 'top-level';
 
       if(VM.error) {
         VM.onError && VM.onError(VM.error);
@@ -77,6 +87,10 @@
     while(top.child) {
       top = top.child;
       count++;
+    }
+
+    if(i > count) {
+      return null;
     }
 
     var depth = count - i;
@@ -142,6 +156,47 @@
     }
   };
 
+  VM.stepOver = function() {
+    if(!rootFrame) return;
+    var top = VM.getTopFrame();
+    var curloc = VM.getLocation();
+    var finalLoc = curloc;
+    var biggest = 0;
+    var locs = debugInfo[top.machineId].locs;
+
+    // find the "biggest" expression in the function that encloses
+    // this one
+    Object.keys(locs).forEach(function(k) {
+      var loc = locs[k];
+
+      if(loc.start.line <= curloc.start.line &&
+         loc.end.line >= curloc.end.line &&
+         loc.start.column <= curloc.start.column &&
+         loc.end.column >= curloc.end.column) {
+
+        var ldiff = ((curloc.start.line - loc.start.line) +
+                     (loc.end.line - curloc.end.line));
+        var cdiff = ((curloc.start.column - loc.start.column) +
+                     (loc.end.column - curloc.end.column));
+        if(ldiff + cdiff > biggest) {
+          finalLoc = loc;
+          biggest = ldiff + cdiff;
+        }
+      }
+    });
+
+    if(finalLoc !== curloc) {
+      while(VM.getLocation() !== finalLoc) {
+        VM.step();
+      }
+
+      VM.step();
+    }
+    else {
+      VM.step();
+    }
+  };
+
   VM.evaluate = function(expr) {
     if(expr === '$_') {
       return lastEval;
@@ -150,12 +205,19 @@
       var top = VM.getTopFrame();
       var res = top.evaluate(expr);
 
-      // switch frames to get any updated data
-      var parent = VM.getFrameOffset(1);
-      parent.child = res.frame;
       // fix the self-referencing pointer
       res.frame.ctx.frame = res.frame;
 
+      // switch frames to get any updated data
+      var parent = VM.getFrameOffset(1);
+      if(parent) {
+        parent.child = res.frame;
+      }
+      else {
+        rootFrame = res.frame;
+      }
+
+      rootFrame.name = 'top-level';
       lastEval = res.result;
       return lastEval;
     }
@@ -174,30 +236,49 @@
   };
 
   VM.getLocation = function() {
-    if(!rootFrame) return;
+    if(!rootFrame || !debugInfo) return;
 
     var top = VM.getTopFrame();
     return debugInfo[top.machineId].locs[top.ctx.next];
   };
 
-  VM.toggleBreakpoint = function(internalLoc) {
-    if(!internalLoc) return;
+  VM.disableBreakpoints = function() {
+    VM.hasBreakpoints = false;
+  };
 
-    var machineId = internalLoc.machineId;
-    var locId = internalLoc.locId;
+  VM.enableBreakpoints = function() {
+    VM.hasBreakpoints = true;
+  };
+
+  VM.removeBreakpoints = function() {
+    // this will reset the interal breakpoint arrays
+    VM.setDebugInfo(debugInfo);
+  };
+
+  VM.toggleBreakpoint = function(line) {
+    _toggleBreakpoint(VM.lineToMachinePos(line));
+  };
+
+  function _toggleBreakpoint(pos) {
+    if(!pos) return;
+
+    var machineId = pos.machineId;
+    var locId = pos.locId;
 
     if(VM.machineBreaks[machineId][locId] === undefined) {
       VM.hasBreakpoints = true;
-      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = true;
+      VM.machineBreaks[pos.machineId][pos.locId] = true;
     }
     else {
-      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = undefined;
+      VM.machineBreaks[pos.machineId][pos.locId] = undefined;
     }
 
     return true;
   };
 
-  VM.lineToInternalLoc = function(line) {
+  VM.lineToMachinePos = function(line) {
+    if(!debugInfo) return null;
+
     for(var i=0, l=debugInfo.length; i<l; i++) {
       var locs = debugInfo[i].locs;
       var keys = Object.keys(locs);

@@ -256,10 +256,10 @@ var Display = React.createClass({
 
   resize: function() {
     var root = this.getDOMNode();
-    var iframe = $(root).find('iframe')[0];
+    var canvas = $(root).find('canvas')[0];
     var rect = root.getBoundingClientRect();
-    iframe.width = rect.width;
-    iframe.height = rect.height;
+    canvas.width = rect.width;
+    canvas.height = rect.height;
   },
 
   render: function() {
@@ -267,7 +267,7 @@ var Display = React.createClass({
     return dom.div(
       { className: cls },
       dom.div({ className: 'inner' },
-              dom.iframe())
+              dom.canvas())
     );
   }
 });

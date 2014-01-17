@@ -1,0 +1,25 @@
+
+// Set a breakpoint by clicking in the gutter to the left of any line,
+// and click "run" at the bottom of the screen to run it
+
+function foo(x) {
+  var y = 10;
+  var z = x * 1000 + 10;
+  console.log(z);
+  
+  if(x > 0) {
+    return foo(x - 1);
+  }
+  return 0;
+}
+
+function bar() {
+  var ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = 'rgb(100, 180, 100)';
+  ctx.fillRect(20, 20, 50, 50);
+}
+
+console.log(foo(50));
+
+bar();

@@ -57,7 +57,26 @@ button.close:hover {
 /* editor */
 
 .editor .highlight {
-    background-color: red;
+    background-color: #393939;
+    padding: .5em;
+}
+
+.editor .highlight-text {
+    background-color: #606060;
+    box-shadow: 0 0 5px red;
+}
+
+.editor .breakpoints {
+    width: 1em;
+}
+
+div.marker {
+    /* width: 10px; */
+    /* height: 10px; */
+    /* border-radius: 5px; */
+    color: #ff3333;
+    font-size: 1.5em;
+    margin-top: -2px;
 }
 
 /* display */
@@ -72,11 +91,6 @@ button.close:hover {
     height: 100%;
     background-color: #202020;
     overflow: auto;
-}
-
-canvas {
-    width: 100%;
-    height: 100%;
 }
 
 /* toolset */
@@ -154,20 +168,39 @@ canvas {
     width: 25%;
 }
 
-.debugger .stack {
-    white-space: pre;
-    font-family: monaco, monospace;
-    overflow: auto;
-    height: 50%;
-    width: 50%;
-    background-color: red;
-    float: left;
+.debugger .state {
+    float: right;
+    background-color: #f6ec47;
+    padding: .5em;
+    text-style: italic;
+    margin-right: 1em;
 }
 
-.debugger .scope {
+.debugger .buttons {
+    height: 3em;
+}
+
+.debugger .stack-outer, .debugger scope-outer {
     width: 50%;
-    float: right;
-    background-color: green;
+    float: left;
+    height: calc(100% - 3em);
+    padding: 0;
+}
+
+.debugger .stack-outer > div:first-child,
+.debugger .scope-outer > div:first-child {
+    font-size: 1.5em;
+    height: 1.25em;
+}
+
+.debugger .stack, .debugger .scope {
+    white-space: pre;
+    font-family: monaco, monospace;
+    height: calc(100% - 1.5em);
+    border: 1px solid #a0a0a0;
+    overflow: auto;
+    background-color: #f0f0f0;
+    padding: 1em;
 }
 
 .console.with-debugger {

@@ -1,5 +1,5 @@
 
-__debug_sourceURL="test.js";
+__debug_sourceURL="test3.js";
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
 
@@ -8,21 +8,31 @@ __debug_sourceURL="test.js";
   var findingRoot = false;
 
   function invokeRoot(fn) {
+    // hack: if there's no debug info, there's no client connected to
+    // this running instance (which could be invoked from an async
+    // event like setTimeout). ignore it.
+    if(!debugInfo) {
+      return;
+    }
+
     VM.state = EXECUTING;
 
     var ctx = fn.$ctx = getContext();
     ctx.softReset();
     fn();
     checkStatus(ctx);
+
+    // clean up the function, since this property is used to tell if
+    // we are inside our VM or not
+    delete fn.$ctx;
   }
 
   function checkStatus(ctx) {
     if(ctx.frame) {
-      ctx.frame.name = 'top-level';
-
       // machine was paused
       VM.state = VM.SUSPENDED;
       rootFrame = ctx.frame;
+      rootFrame.name = 'top-level';
 
       if(VM.error) {
         VM.onError && VM.onError(VM.error);
@@ -79,6 +89,10 @@ __debug_sourceURL="test.js";
     while(top.child) {
       top = top.child;
       count++;
+    }
+
+    if(i > count) {
+      return null;
     }
 
     var depth = count - i;
@@ -144,6 +158,47 @@ __debug_sourceURL="test.js";
     }
   };
 
+  VM.stepOver = function() {
+    if(!rootFrame) return;
+    var top = VM.getTopFrame();
+    var curloc = VM.getLocation();
+    var finalLoc = curloc;
+    var biggest = 0;
+    var locs = debugInfo[top.machineId].locs;
+
+    // find the "biggest" expression in the function that encloses
+    // this one
+    Object.keys(locs).forEach(function(k) {
+      var loc = locs[k];
+
+      if(loc.start.line <= curloc.start.line &&
+         loc.end.line >= curloc.end.line &&
+         loc.start.column <= curloc.start.column &&
+         loc.end.column >= curloc.end.column) {
+
+        var ldiff = ((curloc.start.line - loc.start.line) +
+                     (loc.end.line - curloc.end.line));
+        var cdiff = ((curloc.start.column - loc.start.column) +
+                     (loc.end.column - curloc.end.column));
+        if(ldiff + cdiff > biggest) {
+          finalLoc = loc;
+          biggest = ldiff + cdiff;
+        }
+      }
+    });
+
+    if(finalLoc !== curloc) {
+      while(VM.getLocation() !== finalLoc) {
+        VM.step();
+      }
+
+      VM.step();
+    }
+    else {
+      VM.step();
+    }
+  };
+
   VM.evaluate = function(expr) {
     if(expr === '$_') {
       return lastEval;
@@ -152,12 +207,19 @@ __debug_sourceURL="test.js";
       var top = VM.getTopFrame();
       var res = top.evaluate(expr);
 
-      // switch frames to get any updated data
-      var parent = VM.getFrameOffset(1);
-      parent.child = res.frame;
       // fix the self-referencing pointer
       res.frame.ctx.frame = res.frame;
 
+      // switch frames to get any updated data
+      var parent = VM.getFrameOffset(1);
+      if(parent) {
+        parent.child = res.frame;
+      }
+      else {
+        rootFrame = res.frame;
+      }
+
+      rootFrame.name = 'top-level';
       lastEval = res.result;
       return lastEval;
     }
@@ -176,30 +238,49 @@ __debug_sourceURL="test.js";
   };
 
   VM.getLocation = function() {
-    if(!rootFrame) return;
+    if(!rootFrame || !debugInfo) return;
 
     var top = VM.getTopFrame();
     return debugInfo[top.machineId].locs[top.ctx.next];
   };
 
-  VM.toggleBreakpoint = function(internalLoc) {
-    if(!internalLoc) return;
+  VM.disableBreakpoints = function() {
+    VM.hasBreakpoints = false;
+  };
 
-    var machineId = internalLoc.machineId;
-    var locId = internalLoc.locId;
+  VM.enableBreakpoints = function() {
+    VM.hasBreakpoints = true;
+  };
+
+  VM.removeBreakpoints = function() {
+    // this will reset the interal breakpoint arrays
+    VM.setDebugInfo(debugInfo);
+  };
+
+  VM.toggleBreakpoint = function(line) {
+    _toggleBreakpoint(VM.lineToMachinePos(line));
+  };
+
+  function _toggleBreakpoint(pos) {
+    if(!pos) return;
+
+    var machineId = pos.machineId;
+    var locId = pos.locId;
 
     if(VM.machineBreaks[machineId][locId] === undefined) {
       VM.hasBreakpoints = true;
-      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = true;
+      VM.machineBreaks[pos.machineId][pos.locId] = true;
     }
     else {
-      VM.machineBreaks[internalLoc.machineId][internalLoc.locId] = undefined;
+      VM.machineBreaks[pos.machineId][pos.locId] = undefined;
     }
 
     return true;
   };
 
-  VM.lineToInternalLoc = function(line) {
+  VM.lineToMachinePos = function(line) {
+    if(!debugInfo) return null;
+
     for(var i=0, l=debugInfo.length; i<l; i++) {
       var locs = debugInfo[i].locs;
       var keys = Object.keys(locs);
@@ -506,7 +587,7 @@ VM.setDebugInfo([{
       },
 
       "end": {
-        "line": 6,
+        "line": 9,
         "column": 1
       }
     },
@@ -518,119 +599,611 @@ VM.setDebugInfo([{
       },
 
       "end": {
-        "line": 6,
+        "line": 9,
         "column": 1
       }
     },
 
     "3": {
       "start": {
-        "line": 8,
-        "column": 8
+        "line": 11,
+        "column": 0
       },
 
       "end": {
-        "line": 8,
-        "column": 20
+        "line": 17,
+        "column": 1
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 11,
+        "column": 0
+      },
+
+      "end": {
+        "line": 17,
+        "column": 1
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 19,
+        "column": 0
+      },
+
+      "end": {
+        "line": 27,
+        "column": 1
+      }
+    },
+
+    "7": {
+      "start": {
+        "line": 19,
+        "column": 0
+      },
+
+      "end": {
+        "line": 27,
+        "column": 1
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 29,
+        "column": 0
+      },
+
+      "end": {
+        "line": 34,
+        "column": 1
+      }
+    },
+
+    "10": {
+      "start": {
+        "line": 29,
+        "column": 0
+      },
+
+      "end": {
+        "line": 34,
+        "column": 1
       }
     },
 
     "12": {
       "start": {
-        "line": 8,
-        "column": 4
+        "line": 36,
+        "column": 0
       },
 
       "end": {
-        "line": 8,
-        "column": 20
+        "line": 38,
+        "column": 1
       }
     },
 
     "13": {
       "start": {
-        "line": 8,
-        "column": 4
+        "line": 36,
+        "column": 0
       },
 
       "end": {
-        "line": 8,
-        "column": 20
+        "line": 38,
+        "column": 1
       }
     },
 
     "15": {
       "start": {
-        "line": 9,
+        "line": 40,
         "column": 12
       },
 
       "end": {
-        "line": 9,
+        "line": 40,
         "column": 17
       }
     },
 
     "24": {
       "start": {
-        "line": 9,
+        "line": 40,
         "column": 0
       },
 
       "end": {
-        "line": 9,
+        "line": 40,
         "column": 18
       }
     }
   }
 }, {
-  "finalLoc": 3,
+  "finalLoc": 20,
 
   "locs": {
     "0": {
       "start": {
         "line": 3,
-        "column": 2
+        "column": 6
       },
 
       "end": {
-        "line": 5,
-        "column": 3
+        "line": 3,
+        "column": 11
       }
     },
 
     "1": {
       "start": {
         "line": 3,
-        "column": 2
+        "column": 6
+      },
+
+      "end": {
+        "line": 3,
+        "column": 11
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 4,
+        "column": 6
+      },
+
+      "end": {
+        "line": 4,
+        "column": 26
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 4,
+        "column": 6
+      },
+
+      "end": {
+        "line": 4,
+        "column": 26
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 5,
+        "column": 15
       },
 
       "end": {
         "line": 5,
-        "column": 3
+        "column": 18
       }
-    }
-  }
-}, {
-  "finalLoc": 4,
+    },
 
-  "locs": {
-    "0": {
+    "7": {
       "start": {
-        "line": 4,
+        "line": 5,
+        "column": 15
+      },
+
+      "end": {
+        "line": 5,
+        "column": 18
+      }
+    },
+
+    "8": {
+      "start": {
+        "line": 5,
+        "column": 10
+      },
+
+      "end": {
+        "line": 5,
+        "column": 11
+      }
+    },
+
+    "11": {
+      "start": {
+        "line": 6,
         "column": 4
       },
 
       "end": {
-        "line": 4,
+        "line": 6,
+        "column": 15
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 6,
+        "column": 4
+      },
+
+      "end": {
+        "line": 6,
+        "column": 15
+      }
+    },
+
+    "16": {
+      "start": {
+        "line": 8,
+        "column": 2
+      },
+
+      "end": {
+        "line": 8,
+        "column": 11
+      }
+    }
+  }
+}, {
+  "finalLoc": 30,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 12,
+        "column": 6
+      },
+
+      "end": {
+        "line": 12,
+        "column": 12
+      }
+    },
+
+    "1": {
+      "start": {
+        "line": 12,
+        "column": 6
+      },
+
+      "end": {
+        "line": 12,
+        "column": 12
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 13,
+        "column": 10
+      },
+
+      "end": {
+        "line": 13,
+        "column": 13
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 13,
+        "column": 10
+      },
+
+      "end": {
+        "line": 13,
+        "column": 13
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 13,
+        "column": 15
+      },
+
+      "end": {
+        "line": 13,
+        "column": 18
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 14,
+        "column": 4
+      },
+
+      "end": {
+        "line": 14,
+        "column": 9
+      }
+    },
+
+    "10": {
+      "start": {
+        "line": 14,
+        "column": 4
+      },
+
+      "end": {
+        "line": 14,
+        "column": 9
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 13,
+        "column": 20
+      },
+
+      "end": {
+        "line": 13,
+        "column": 23
+      }
+    },
+
+    "13": {
+      "start": {
+        "line": 13,
+        "column": 20
+      },
+
+      "end": {
+        "line": 13,
+        "column": 23
+      }
+    },
+
+    "17": {
+      "start": {
+        "line": 16,
+        "column": 9
+      },
+
+      "end": {
+        "line": 16,
+        "column": 16
+      }
+    },
+
+    "26": {
+      "start": {
+        "line": 16,
+        "column": 2
+      },
+
+      "end": {
+        "line": 16,
         "column": 17
+      }
+    }
+  }
+}, {
+  "finalLoc": 25,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 20,
+        "column": 6
+      },
+
+      "end": {
+        "line": 20,
+        "column": 12
+      }
+    },
+
+    "1": {
+      "start": {
+        "line": 20,
+        "column": 6
+      },
+
+      "end": {
+        "line": 20,
+        "column": 12
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 22,
+        "column": 4
+      },
+
+      "end": {
+        "line": 22,
+        "column": 9
+      }
+    },
+
+    "4": {
+      "start": {
+        "line": 22,
+        "column": 4
+      },
+
+      "end": {
+        "line": 22,
+        "column": 9
+      }
+    },
+
+    "6": {
+      "start": {
+        "line": 23,
+        "column": 4
+      },
+
+      "end": {
+        "line": 23,
+        "column": 7
+      }
+    },
+
+    "7": {
+      "start": {
+        "line": 23,
+        "column": 4
+      },
+
+      "end": {
+        "line": 23,
+        "column": 7
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 24,
+        "column": 10
+      },
+
+      "end": {
+        "line": 24,
+        "column": 15
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 26,
+        "column": 9
+      },
+
+      "end": {
+        "line": 26,
+        "column": 18
+      }
+    },
+
+    "21": {
+      "start": {
+        "line": 26,
+        "column": 2
+      },
+
+      "end": {
+        "line": 26,
+        "column": 19
+      }
+    }
+  }
+}, {
+  "finalLoc": 32,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 30,
+        "column": 5
+      },
+
+      "end": {
+        "line": 30,
+        "column": 10
+      }
+    },
+
+    "3": {
+      "start": {
+        "line": 31,
+        "column": 11
+      },
+
+      "end": {
+        "line": 31,
+        "column": 17
+      }
+    },
+
+    "12": {
+      "start": {
+        "line": 31,
+        "column": 24
+      },
+
+      "end": {
+        "line": 31,
+        "column": 29
+      }
+    },
+
+    "15": {
+      "start": {
+        "line": 31,
+        "column": 20
+      },
+
+      "end": {
+        "line": 31,
+        "column": 30
+      }
+    },
+
+    "24": {
+      "start": {
+        "line": 31,
+        "column": 4
+      },
+
+      "end": {
+        "line": 31,
+        "column": 31
+      }
+    },
+
+    "28": {
+      "start": {
+        "line": 33,
+        "column": 2
+      },
+
+      "end": {
+        "line": 33,
+        "column": 13
+      }
+    }
+  }
+}, {
+  "finalLoc": 13,
+
+  "locs": {
+    "0": {
+      "start": {
+        "line": 37,
+        "column": 9
+      },
+
+      "end": {
+        "line": 37,
+        "column": 19
+      }
+    },
+
+    "9": {
+      "start": {
+        "line": 37,
+        "column": 2
+      },
+
+      "end": {
+        "line": 37,
+        "column": 20
       }
     }
   }
 }]);
 
 VM.invokeRoot(function $anon1() {
-  var foo, f;
+  var quux, mumble, baz, bar, foo;
   var $ctx = $anon1.$ctx;
 
   if ($ctx === undefined)
@@ -640,8 +1213,11 @@ VM.invokeRoot(function $anon1() {
 
   try {
     if ($ctx.frame) {
+      quux = $ctx.frame.scope.quux;
+      mumble = $ctx.frame.scope.mumble;
+      baz = $ctx.frame.scope.baz;
+      bar = $ctx.frame.scope.bar;
       foo = $ctx.frame.scope.foo;
-      f = $ctx.frame.scope.f;
       var $child = $ctx.frame.child;
 
       if ($child) {
@@ -676,21 +1252,21 @@ VM.invokeRoot(function $anon1() {
 
       switch ($ctx.next) {
       case 0:
-        foo = function foo(x, y, z) {
-          var bar;
-          var $ctx = foo.$ctx;
+        quux = function quux(i) {
+          var z, obj, k;
+          var $ctx = quux.$ctx;
 
           if ($ctx === undefined)
-            return VM.invokeRoot(foo);
+            return VM.invokeRoot(quux);
 
           $ctx.isCompiled = true;
 
           try {
             if ($ctx.frame) {
-              x = $ctx.frame.scope.x;
-              y = $ctx.frame.scope.y;
+              i = $ctx.frame.scope.i;
               z = $ctx.frame.scope.z;
-              bar = $ctx.frame.scope.bar;
+              obj = $ctx.frame.scope.obj;
+              k = $ctx.frame.scope.k;
               var $child = $ctx.frame.child;
 
               if ($child) {
@@ -725,76 +1301,42 @@ VM.invokeRoot(function $anon1() {
 
               switch ($ctx.next) {
               case 0:
-                bar = function bar(w) {
-                  var $ctx = bar.$ctx;
-
-                  if ($ctx === undefined)
-                    return VM.invokeRoot(bar);
-
-                  $ctx.isCompiled = true;
-
-                  try {
-                    if ($ctx.frame) {
-                      w = $ctx.frame.scope.w;
-                      var $child = $ctx.frame.child;
-
-                      if ($child) {
-                        var $child$ctx = $child.ctx;
-                        $child.fn.$ctx = $child$ctx;
-                        $child.fn.call($child.thisPtr);
-
-                        if ($child$ctx.frame) {
-                          $ctx.frame.child = $child$ctx.frame;
-                          return;
-                        } else {
-                          $ctx.frame = null;
-                          $ctx.childFrame = null;
-                          $ctx[$ctx.resultLoc] = $child$ctx.rval;
-
-                          if (VM.stepping)
-                            throw null;
-                        }
-                      } else {
-                        if ($ctx.staticBreakpoint)
-                          $ctx.next = $ctx.next + 3;
-
-                        $ctx.frame = null;
-                        $ctx.childFrame = null;
-                      }
-                    } else if (VM.stepping)
-                      throw null;
-
-                    while (1) {
-                      if (VM.hasBreakpoints && VM.machineBreaks[2][$ctx.next] !== undefined)
-                        break;
-
-                      switch ($ctx.next) {
-                      case 0:
-                        $ctx.rval = x + w;
-                        delete $ctx.thrown;
-                        $ctx.next = 4;
-                        break;
-                      case 4:
-                        return $ctx.stop();
-                      case -1:
-                        $ctx.rval = eval(VM.evalArg);
-                      }
-
-                      if (VM.stepping)
-                        break;
-                    }
-                  }catch (e) {
-                    VM.error = e;
-                  }
-
-                  $ctx.frame = new VM.Frame(2, "bar", bar, {
-                    "w": w
-                  }, ["x", "y", "z", "bar", "foo", "f"], this, $ctx, $ctx.childFrame);
-                };
-
+                z = 1;
                 $ctx.next = 3;
                 break;
               case 3:
+                obj = {
+                  x: 1,
+                  y: 2
+                };
+
+                $ctx.next = 6;
+                break;
+              case 6:
+                $ctx.t6 = $ctx.keys(obj);
+              case 7:
+                if (!$ctx.t6.length) {
+                  $ctx.next = 16;
+                  break;
+                }
+
+                k = $ctx.t6.pop();
+                $ctx.next = 11;
+                break;
+              case 11:
+                z *= obj[k];
+                $ctx.next = 7;
+                break;
+              case 14:
+                $ctx.next = 7;
+                break;
+              case 16:
+                $ctx.rval = z;
+                delete $ctx.thrown;
+                $ctx.next = 20;
+                break;
+              case 20:
+                quux.$ctx = undefined;
                 return $ctx.stop();
               case -1:
                 $ctx.rval = eval(VM.evalArg);
@@ -807,25 +1349,507 @@ VM.invokeRoot(function $anon1() {
             VM.error = e;
           }
 
-          $ctx.frame = new VM.Frame(1, "foo", foo, {
-            "x": x,
-            "y": y,
+          $ctx.frame = new VM.Frame(1, "quux", quux, {
+            "i": i,
             "z": z,
-            "bar": bar
-          }, ["foo", "f"], this, $ctx, $ctx.childFrame);
+            "obj": obj,
+            "k": k
+          }, ["quux", "mumble", "baz", "bar", "foo"], this, $ctx, $ctx.childFrame);
+
+          quux.$ctx = undefined;
         };
 
         $ctx.next = 3;
         break;
       case 3:
-        var $t1 = VM.getContext();
+        mumble = function mumble(i) {
+          var z, j;
+          var $ctx = mumble.$ctx;
+
+          if ($ctx === undefined)
+            return VM.invokeRoot(mumble);
+
+          $ctx.isCompiled = true;
+
+          try {
+            if ($ctx.frame) {
+              i = $ctx.frame.scope.i;
+              z = $ctx.frame.scope.z;
+              j = $ctx.frame.scope.j;
+              var $child = $ctx.frame.child;
+
+              if ($child) {
+                var $child$ctx = $child.ctx;
+                $child.fn.$ctx = $child$ctx;
+                $child.fn.call($child.thisPtr);
+
+                if ($child$ctx.frame) {
+                  $ctx.frame.child = $child$ctx.frame;
+                  return;
+                } else {
+                  $ctx.frame = null;
+                  $ctx.childFrame = null;
+                  $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                  if (VM.stepping)
+                    throw null;
+                }
+              } else {
+                if ($ctx.staticBreakpoint)
+                  $ctx.next = $ctx.next + 3;
+
+                $ctx.frame = null;
+                $ctx.childFrame = null;
+              }
+            } else if (VM.stepping)
+              throw null;
+
+            while (1) {
+              if (VM.hasBreakpoints && VM.machineBreaks[2][$ctx.next] !== undefined)
+                break;
+
+              switch ($ctx.next) {
+              case 0:
+                z = 10;
+                $ctx.next = 3;
+                break;
+              case 3:
+                j = 0;
+                $ctx.next = 6;
+                break;
+              case 6:
+                if (!(j < i)) {
+                  $ctx.next = 17;
+                  break;
+                }
+
+                $ctx.next = 9;
+                break;
+              case 9:
+                z = j;
+                $ctx.next = 12;
+                break;
+              case 12:
+                j++;
+                $ctx.next = 6;
+                break;
+              case 15:
+                $ctx.next = 6;
+                break;
+              case 17:
+                var $t8 = VM.getContext();
+
+                if (quux)
+                  quux.$ctx = $t8;
+
+                $t8.softReset();
+                var $t9 = quux(z);
+                $ctx.next = 26;
+
+                if ($t8.frame) {
+                  $ctx.childFrame = $t8.frame;
+                  $ctx.resultLoc = "t7";
+                  VM.stepping = true;
+                  break;
+                }
+
+                $ctx.t7 = ($t8.isCompiled ? $t8.rval : $t9);
+                VM.releaseContext();
+                break;
+              case 26:
+                $ctx.rval = $ctx.t7;
+                delete $ctx.thrown;
+                $ctx.next = 30;
+                break;
+              case 30:
+                mumble.$ctx = undefined;
+                return $ctx.stop();
+              case -1:
+                $ctx.rval = eval(VM.evalArg);
+              }
+
+              if (VM.stepping)
+                break;
+            }
+          }catch (e) {
+            VM.error = e;
+          }
+
+          $ctx.frame = new VM.Frame(2, "mumble", mumble, {
+            "i": i,
+            "z": z,
+            "j": j
+          }, ["quux", "mumble", "baz", "bar", "foo"], this, $ctx, $ctx.childFrame);
+
+          mumble.$ctx = undefined;
+        };
+
+        $ctx.next = 6;
+        break;
+      case 6:
+        baz = function baz(i) {
+          var j;
+          var $ctx = baz.$ctx;
+
+          if ($ctx === undefined)
+            return VM.invokeRoot(baz);
+
+          $ctx.isCompiled = true;
+
+          try {
+            if ($ctx.frame) {
+              i = $ctx.frame.scope.i;
+              j = $ctx.frame.scope.j;
+              var $child = $ctx.frame.child;
+
+              if ($child) {
+                var $child$ctx = $child.ctx;
+                $child.fn.$ctx = $child$ctx;
+                $child.fn.call($child.thisPtr);
+
+                if ($child$ctx.frame) {
+                  $ctx.frame.child = $child$ctx.frame;
+                  return;
+                } else {
+                  $ctx.frame = null;
+                  $ctx.childFrame = null;
+                  $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                  if (VM.stepping)
+                    throw null;
+                }
+              } else {
+                if ($ctx.staticBreakpoint)
+                  $ctx.next = $ctx.next + 3;
+
+                $ctx.frame = null;
+                $ctx.childFrame = null;
+              }
+            } else if (VM.stepping)
+              throw null;
+
+            while (1) {
+              if (VM.hasBreakpoints && VM.machineBreaks[3][$ctx.next] !== undefined)
+                break;
+
+              switch ($ctx.next) {
+              case 0:
+                j = 10;
+                $ctx.next = 3;
+                break;
+              case 3:
+                j = 5;
+                $ctx.next = 6;
+                break;
+              case 6:
+                i--;
+                $ctx.next = 9;
+                break;
+              case 9:
+                if (i > 0) {
+                  $ctx.next = 3;
+                  break;
+                }
+
+                $ctx.next = 12;
+                break;
+              case 12:
+                var $t11 = VM.getContext();
+
+                if (mumble)
+                  mumble.$ctx = $t11;
+
+                $t11.softReset();
+                var $t12 = mumble(j);
+                $ctx.next = 21;
+
+                if ($t11.frame) {
+                  $ctx.childFrame = $t11.frame;
+                  $ctx.resultLoc = "t10";
+                  VM.stepping = true;
+                  break;
+                }
+
+                $ctx.t10 = ($t11.isCompiled ? $t11.rval : $t12);
+                VM.releaseContext();
+                break;
+              case 21:
+                $ctx.rval = $ctx.t10;
+                delete $ctx.thrown;
+                $ctx.next = 25;
+                break;
+              case 25:
+                baz.$ctx = undefined;
+                return $ctx.stop();
+              case -1:
+                $ctx.rval = eval(VM.evalArg);
+              }
+
+              if (VM.stepping)
+                break;
+            }
+          }catch (e) {
+            VM.error = e;
+          }
+
+          $ctx.frame = new VM.Frame(3, "baz", baz, {
+            "i": i,
+            "j": j
+          }, ["quux", "mumble", "baz", "bar", "foo"], this, $ctx, $ctx.childFrame);
+
+          baz.$ctx = undefined;
+        };
+
+        $ctx.next = 9;
+        break;
+      case 9:
+        bar = function bar(i) {
+          var $ctx = bar.$ctx;
+
+          if ($ctx === undefined)
+            return VM.invokeRoot(bar);
+
+          $ctx.isCompiled = true;
+
+          try {
+            if ($ctx.frame) {
+              i = $ctx.frame.scope.i;
+              var $child = $ctx.frame.child;
+
+              if ($child) {
+                var $child$ctx = $child.ctx;
+                $child.fn.$ctx = $child$ctx;
+                $child.fn.call($child.thisPtr);
+
+                if ($child$ctx.frame) {
+                  $ctx.frame.child = $child$ctx.frame;
+                  return;
+                } else {
+                  $ctx.frame = null;
+                  $ctx.childFrame = null;
+                  $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                  if (VM.stepping)
+                    throw null;
+                }
+              } else {
+                if ($ctx.staticBreakpoint)
+                  $ctx.next = $ctx.next + 3;
+
+                $ctx.frame = null;
+                $ctx.childFrame = null;
+              }
+            } else if (VM.stepping)
+              throw null;
+
+            while (1) {
+              if (VM.hasBreakpoints && VM.machineBreaks[4][$ctx.next] !== undefined)
+                break;
+
+              switch ($ctx.next) {
+              case 0:
+                if (!(i > 0)) {
+                  $ctx.next = 28;
+                  break;
+                }
+
+                $ctx.next = 3;
+                break;
+              case 3:
+                var $t14 = VM.getContext();
+
+                if (baz)
+                  baz.$ctx = $t14;
+
+                $t14.softReset();
+                var $t15 = baz(i);
+                $ctx.next = 12;
+
+                if ($t14.frame) {
+                  $ctx.childFrame = $t14.frame;
+                  $ctx.resultLoc = "t13";
+                  VM.stepping = true;
+                  break;
+                }
+
+                $ctx.t13 = ($t14.isCompiled ? $t14.rval : $t15);
+                VM.releaseContext();
+                break;
+              case 12:
+                $ctx.t18 = i - 1;
+                $ctx.next = 15;
+                break;
+              case 15:
+                var $t17 = VM.getContext();
+
+                if (bar)
+                  bar.$ctx = $t17;
+
+                $t17.softReset();
+                var $t19 = bar($ctx.t18);
+                $ctx.next = 24;
+
+                if ($t17.frame) {
+                  $ctx.childFrame = $t17.frame;
+                  $ctx.resultLoc = "t16";
+                  VM.stepping = true;
+                  break;
+                }
+
+                $ctx.t16 = ($t17.isCompiled ? $t17.rval : $t19);
+                VM.releaseContext();
+                break;
+              case 24:
+                $ctx.rval = $ctx.t13 + $ctx.t16;
+                delete $ctx.thrown;
+                $ctx.next = 32;
+                break;
+              case 28:
+                $ctx.rval = 100;
+                delete $ctx.thrown;
+                $ctx.next = 32;
+                break;
+              case 32:
+                bar.$ctx = undefined;
+                return $ctx.stop();
+              case -1:
+                $ctx.rval = eval(VM.evalArg);
+              }
+
+              if (VM.stepping)
+                break;
+            }
+          }catch (e) {
+            VM.error = e;
+          }
+
+          $ctx.frame = new VM.Frame(4, "bar", bar, {
+            "i": i
+          }, ["quux", "mumble", "baz", "bar", "foo"], this, $ctx, $ctx.childFrame);
+
+          bar.$ctx = undefined;
+        };
+
+        $ctx.next = 12;
+        break;
+      case 12:
+        foo = function foo() {
+          var $ctx = foo.$ctx;
+
+          if ($ctx === undefined)
+            return VM.invokeRoot(foo);
+
+          $ctx.isCompiled = true;
+
+          try {
+            if ($ctx.frame) {
+              var $child = $ctx.frame.child;
+
+              if ($child) {
+                var $child$ctx = $child.ctx;
+                $child.fn.$ctx = $child$ctx;
+                $child.fn.call($child.thisPtr);
+
+                if ($child$ctx.frame) {
+                  $ctx.frame.child = $child$ctx.frame;
+                  return;
+                } else {
+                  $ctx.frame = null;
+                  $ctx.childFrame = null;
+                  $ctx[$ctx.resultLoc] = $child$ctx.rval;
+
+                  if (VM.stepping)
+                    throw null;
+                }
+              } else {
+                if ($ctx.staticBreakpoint)
+                  $ctx.next = $ctx.next + 3;
+
+                $ctx.frame = null;
+                $ctx.childFrame = null;
+              }
+            } else if (VM.stepping)
+              throw null;
+
+            while (1) {
+              if (VM.hasBreakpoints && VM.machineBreaks[5][$ctx.next] !== undefined)
+                break;
+
+              switch ($ctx.next) {
+              case 0:
+                var $t21 = VM.getContext();
+
+                if (bar)
+                  bar.$ctx = $t21;
+
+                $t21.softReset();
+                var $t22 = bar(10000);
+                $ctx.next = 9;
+
+                if ($t21.frame) {
+                  $ctx.childFrame = $t21.frame;
+                  $ctx.resultLoc = "t20";
+                  VM.stepping = true;
+                  break;
+                }
+
+                $ctx.t20 = ($t21.isCompiled ? $t21.rval : $t22);
+                VM.releaseContext();
+                break;
+              case 9:
+                $ctx.rval = $ctx.t20;
+                delete $ctx.thrown;
+                $ctx.next = 13;
+                break;
+              case 13:
+                foo.$ctx = undefined;
+                return $ctx.stop();
+              case -1:
+                $ctx.rval = eval(VM.evalArg);
+              }
+
+              if (VM.stepping)
+                break;
+            }
+          }catch (e) {
+            VM.error = e;
+          }
+
+          $ctx.frame = new VM.Frame(5, "foo", foo, {}, ["quux", "mumble", "baz", "bar", "foo"], this, $ctx, $ctx.childFrame);
+          foo.$ctx = undefined;
+        };
+
+        $ctx.next = 15;
+        break;
+      case 15:
+        var $t3 = VM.getContext();
 
         if (foo)
-          foo.$ctx = $t1;
+          foo.$ctx = $t3;
+
+        $t3.softReset();
+        var $t4 = foo();
+        $ctx.next = 24;
+
+        if ($t3.frame) {
+          $ctx.childFrame = $t3.frame;
+          $ctx.resultLoc = "t2";
+          VM.stepping = true;
+          break;
+        }
+
+        $ctx.t2 = ($t3.isCompiled ? $t3.rval : $t4);
+        VM.releaseContext();
+        break;
+      case 24:
+        var $t1 = VM.getContext();
+
+        if (console.log)
+          console.log.$ctx = $t1;
 
         $t1.softReset();
-        var $t2 = foo(1, 2, 3);
-        $ctx.next = 12;
+        var $t5 = console.log($ctx.t2);
+        $ctx.next = 33;
 
         if ($t1.frame) {
           $ctx.childFrame = $t1.frame;
@@ -834,54 +1858,11 @@ VM.invokeRoot(function $anon1() {
           break;
         }
 
-        $ctx.t0 = ($t1.isCompiled ? $t1.rval : $t2);
-        VM.releaseContext();
-        break;
-      case 12:
-        f = $ctx.t0;
-        $ctx.next = 15;
-        break;
-      case 15:
-        var $t6 = VM.getContext();
-
-        if (f)
-          f.$ctx = $t6;
-
-        $t6.softReset();
-        var $t7 = f(20);
-        $ctx.next = 24;
-
-        if ($t6.frame) {
-          $ctx.childFrame = $t6.frame;
-          $ctx.resultLoc = "t5";
-          VM.stepping = true;
-          break;
-        }
-
-        $ctx.t5 = ($t6.isCompiled ? $t6.rval : $t7);
-        VM.releaseContext();
-        break;
-      case 24:
-        var $t4 = VM.getContext();
-
-        if (console.log)
-          console.log.$ctx = $t4;
-
-        $t4.softReset();
-        var $t8 = console.log($ctx.t5);
-        $ctx.next = 33;
-
-        if ($t4.frame) {
-          $ctx.childFrame = $t4.frame;
-          $ctx.resultLoc = "t3";
-          VM.stepping = true;
-          break;
-        }
-
-        $ctx.t3 = ($t4.isCompiled ? $t4.rval : $t8);
+        $ctx.t0 = ($t1.isCompiled ? $t1.rval : $t5);
         VM.releaseContext();
         break;
       case 33:
+        $anon1.$ctx = undefined;
         return $ctx.stop();
       case -1:
         $ctx.rval = eval(VM.evalArg);
@@ -895,7 +1876,12 @@ VM.invokeRoot(function $anon1() {
   }
 
   $ctx.frame = new VM.Frame(0, "$anon1", $anon1, {
-    "foo": foo,
-    "f": f
+    "quux": quux,
+    "mumble": mumble,
+    "baz": baz,
+    "bar": bar,
+    "foo": foo
   }, [], this, $ctx, $ctx.childFrame);
+
+  $anon1.$ctx = undefined;
 }, this);
