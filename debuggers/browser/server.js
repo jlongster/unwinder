@@ -12,12 +12,14 @@ var processes = [];
 
 app.get('/process/:id', function(req, res) {
   var id = req.params.id;
-  res.write(processes[id]);
+  res.send(processes[id]);
 });
 
 app.post('/process', function(req, res) {
   var src = req.body.src;
-  processes.push[baseid++] = src;
+  processes[baseid] = src;
+  res.send('' + baseid);
+  baseid++;
 });
 
 app.listen(4000);

@@ -7,6 +7,10 @@ html, body, .app {
     height: 100%;
 }
 
+iframe {
+    border: 0;
+}
+
 button {
     margin-right: 1em;
 }
@@ -180,9 +184,8 @@ div.marker {
     height: 3em;
 }
 
-.debugger .stack-outer, .debugger scope-outer {
-    width: 50%;
-    float: left;
+.debugger .stack-outer,
+.debugger .scope-outer {
     height: calc(100% - 3em);
     padding: 0;
 }

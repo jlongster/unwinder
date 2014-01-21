@@ -20,7 +20,10 @@ function convert(es6File, es5File, callback) {
       return callback(err);
     }
 
-    fs.writeFile(es5File, regenerator(es6), callback);
+    fs.writeFile(es5File,
+                 regenerator(es6, { includeRuntime: true,
+                                    includeDebug: true }).code,
+                 callback);
   });
 }
 
@@ -71,18 +74,18 @@ if (semver.gte(process.version, "0.11.2")) {
   enqueue("mocha", [
     "--harmony",
     "--reporter", "spec",
-    "./test/tests.es6.js"
+    "./tests/tests.js"
   ]);
 }
 
-enqueue(convert, [
-  "./test/tests.es6.js",
-  "./test/tests.es5.js"
-]);
+// enqueue(convert, [
+//   "./tests/tests.js",
+//   "./tests/tests.build.js"
+// ]);
 
 enqueue("mocha", [
   "--reporter", "spec",
-  "./test/tests.es5.js"
+  "./tests/tests.js"
 ]);
 
 var mochaDir = path.dirname(require.resolve("mocha"));
@@ -105,8 +108,8 @@ if (!semver.eq(process.version, "0.11.7")) {
   try {
     require.resolve("browserify"); // Throws if missing.
     enqueue(bundle, [
-      "./test/tests.es5.js",
-      "./test/tests.browser.js"
+      "./tests/tests.build.js",
+      "./tests/tests.browser.js"
     ]);
   } catch (ignored) {
     console.error("browserify not installed; skipping bundle step");

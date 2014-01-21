@@ -11,6 +11,8 @@
 var assert = require("assert");
 var path = require("path");
 var fs = require("fs");
+var types = require("ast-types");
+var b = types.builders;
 var transform = require("./lib/visit").transform;
 var utils = require("./lib/util");
 var recast = require("recast");
@@ -32,10 +34,6 @@ function regenerator(source, options) {
   var runtime = options.includeRuntime ? fs.readFileSync(
     regenerator.runtime.dev, "utf-8"
   ) + "\n" : "";
-
-  // if (!genFunExp.test(source)) {
-  //   return runtime + source; // Shortcut: no generators to transform.
-  // }
 
   var runtimeBody = recast.parse(runtime, {
     sourceFileName: regenerator.runtime.dev
@@ -75,18 +73,42 @@ function regenerator(source, options) {
     }
   }
 
-  var transformed = transform(ast, options.includeDebug);
+  var transformed = transform(ast, options);
   recastAst.program = transformed.ast;
+  var appendix = '';
 
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
   if (options.includeRuntime) {
+    recastAst.program.body = [b.variableDeclaration(
+      'var',
+      [b.variableDeclarator(
+        b.identifier('$__global'),
+        b.callExpression(
+          b.functionExpression(
+            null, [],
+            b.blockStatement(recastAst.program.body)
+          ),
+          []
+        )
+      )]
+    )];
+
     var body = recastAst.program.body;
     body.unshift.apply(body, runtimeBody);
+
+    appendix += 'var VM = new $Machine();\n' +
+      'VM.on("error", function(e) { throw e; });\n' +
+      'VM.run($__global, new $DebugInfo(__debugInfo));';
+  }
+
+  if(options.includeDebug) {
+    var body = recastAst.program.body;
+    body.unshift.apply(body, transformed.debugAST);
   }
 
   return {
-    code: recast.print(recastAst, recastOptions).code,
+    code: recast.print(recastAst, recastOptions).code + '\n' + appendix,
     debugInfo: transformed.debugInfo
   };
 }

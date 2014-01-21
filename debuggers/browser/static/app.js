@@ -16,19 +16,17 @@ var dom = React.DOM;
 
 var App = React.createClass({
   getInitialState: function() {
-    return { source: null,
-             toolsetOpen: true };
+    return {
+      source: null,
+      toolsetOpen: true,
+      client: null
+    };
   },
 
   componentDidMount: function() {
     $.get('src.txt', function(res) {
       this.setState({ source: res });
     }.bind(this));
-
-    VM.onBreakpoint = function() {
-      this.openToolset('debugger');
-      this.refs.toolset.getTool('debugger').printReport();
-    }.bind(this);
 
     this._onResize = function() {
       this.refs.editor.resize();
@@ -38,66 +36,155 @@ var App = React.createClass({
     $(window).on('resize', this._onResize);
   },
 
+  componentDidUpdate: function(prevProps, prevState) {
+    if(prevState.client !== this.state.client) {
+      this.state.client.on('breakpoint', function(loc) {
+        this.openToolset('debugger');
+        this.refs.editor.highlight(loc);
+        this.refs.toolset.getTool('debugger').printReport();
+      }.bind(this));
+    }
+  },
+
   componentWillUnmount: function() {
     $(window).off('resize', this._onResize);
   },
 
   handleSourceChange: function(src) {
-    VM.reset();
     this.refs.editor.highlight(null);
     this.setState({ source: src });
   },
 
   handleBreakpoint: function(line) {
-    return VM.toggleBreakpoint(line);
+    if(this.state.client) {
+      this.state.debugInfo.toggleBreakpoint(line);
+      this.state.client.send({ type: 'setDebugInfo',
+                               args: [this.state.debugInfo] });
+    }
+  },
+
+  compile: function(src, opts) {
+    try {
+      return probejs.compile(src, opts);
+    }
+    catch(e) {
+      console.log(e.toString() + '\n' + e.stack);
+      return;
+    }
+  },
+
+  runExpression: function() {
+    var editor = this.refs.editor;
+    var cursor = editor._editor.getCursor();
+    cursor.line += 1;
+
+    function getNodeAtPoint(nodes, cursor) {
+      return nodes.reduce(function(acc, topNode) {
+        var loc = topNode.loc;
+
+        if((loc.start.line < cursor.line &&
+            loc.end.line > cursor.line) ||
+           (loc.start.line === cursor.line &&
+            loc.start.column <= cursor.ch) ||
+           (loc.end.line === cursor.column &&
+            loc.end.column >= cursor.ch)) {
+          return topNode;
+        }
+        return acc;
+      }, null);
+    }
+
+    function findDeepestFunction(node, cursor) {
+      var found = getNodeAtPoint(node.body.body, cursor);
+
+      if(!found) {
+        return null;
+      }
+      else if(found.type !== 'FunctionDeclaration' &&
+              found.type !== 'FunctionExpression') {
+        return null;
+      }
+      else {
+        return findDeepestFunction(found, cursor) || found;
+      }
+    }
+
+    var ast = esprima.parse(editor.getValue(), {
+      loc: true,
+      range: true
+    });
+
+    var node = getNodeAtPoint(ast.body, cursor);
+    if(node.type === 'FunctionExpression' ||
+       node.type === 'FunctionDeclaration') {
+      node = findDeepestFunction(node, cursor) || node;
+    }
+
+    var src = editor.getValue().slice(node.range[0], node.range[1]);
+    
+    if(node.type === 'FunctionDeclaration') {
+      // compile function declarations
+      var output = this.compile(src);
+      src = output.code;
+    }
+
+    this.state.client.send({ type: 'eval',
+                             args: [src] }, function(err, res) {
+                               console.log(err, res);
+                             });
+    this.setState({ debugInfo: debugInfo });
   },
 
   run: function() {
-    if(VM.state === VM.SUSPENDED) {
-      VM.run();
-      return;
-    }
-    VM.reset();
-
+    var state = this.state;
+    var client = state.client;
     var editor = this.refs.editor;
     var consoleTool = this.refs.toolset.getTool('console');
+    var src = editor.getValue();
     consoleTool.clear();
 
-    try {
-      var output = probejs.compile(editor.getValue());
-    }
-    catch(e) {
-      consoleTool.log(e.toString());
-      return;
-    }
-
-    // this.setState({
-    //     displayValue: output.code
-    // });
-
-    VM.setDebugInfo(output.debugInfo);
-
-    // hack to scan for breakpoints
-    VM.removeBreakpoints();
-    var mirror = editor._editor;
-    mirror.eachLine(function(line) {
-      var info = mirror.lineInfo(line);
-      var markers = info.gutterMarkers;
-      if(markers) {
-        VM.toggleBreakpoint(info.line + 1);
-      }
+    var output = this.compile(src, {
+      asRoot: true
     });
 
+    var debugInfo = new $DebugInfo(output.debugInfo);
     var display = this.refs.display.getDOMNode();
-    var canvas = display.querySelector('canvas');
+    var iframe = display.querySelector('iframe');
+    iframe.srcdoc = '<!DOCTYPE html>' +
+      '<html>' +
+      '<head><style>' +
+      'html, body { margin: 0; width: 100%; height: 100%; }' +
+      '</style></head>' +
+      '<body>' +
+      '<canvas></canvas>' +
+      '<script src="/lib/lodash.min.js"></script>' + // temporary
+      '<script src="/vm.js"></script>' +
+      '<script>var VM = new $Machine();</script>' +
+      '<script src="/conn.js"></script>' +
+      '<script src="/app-conn.js"></script>' +
+      '</body></html>';
 
-    var func = new Function(
-      'VM', 'console', 'canvas',
-      output.code
-    );
+    if(client) {
+      client.kill();
+    }
+    client = new Connection(iframe.contentWindow, 'parent');
+    client.on('ready', function() {
+      // hack to scan for breakpoints
+      var mirror = editor._editor;
+      mirror.eachLine(function(line) {
+        var info = mirror.lineInfo(line);
+        var markers = info.gutterMarkers;
+        if(markers) {
+          debugInfo.setBreakpoint(info.line + 1);
+        }
+      });
 
-    func(VM, consoleTool.getConsoleObject(), canvas);
-    consoleTool.flush();
+      client.send({ type: 'begin',
+                    args: [output.code, debugInfo] });
+    });
+
+    this.setState({ client: client,
+                    debugInfo: debugInfo });
   },
 
   toggleToolset: function(tool) {
@@ -117,6 +204,10 @@ var App = React.createClass({
     window.location.href = window.location.href;
   },
 
+  getMachine: function() {
+    return this.state.machine;
+  },
+
   render: function() {
     return dom.div(
       { className: 'app' },
@@ -127,6 +218,7 @@ var App = React.createClass({
           className: ('col col-sm-6 left ' +
                       (this.state.toolsetOpen ? 'partial' : 'full')),
           value: this.state.source,
+          client: this.state.client,
           onChange: this.handleSourceChange,
           onToggleBreakpoint: this.handleBreakpoint
         }),
@@ -136,12 +228,14 @@ var App = React.createClass({
                   value: this.state.displayValue }),
         Toolset({ className: this.state.toolsetOpen ? '' : 'hidden',
                   ref: 'toolset',
+                  client: this.state.client,
                   onClose: this.closeToolset,
                   getEditor: function() {
                     return this.refs.editor;
-                  }.bind(this)})
+                  }.bind(this) })
       ),
       Footer({ onRun: this.run,
+               onRunExpression: this.runExpression,
                toolsetOpen: this.state.toolsetOpen,
                onClear: this.clear,
                onToggleToolset: this.toggleToolset })
@@ -202,11 +296,15 @@ var Editor = React.createClass({
       this._editor.setValue(this.props.value || '');
     }
 
-    this.resize();
-
-    if(VM.state === VM.SUSPENDED) {
-      this.highlight(VM.getLocation());
+    if(prevProps.client !== this.props.client) {
+      this.props.client.on('change', function(state, loc) {
+        if(state == 'suspended') {
+          this.highlight(loc);
+        }
+      });
     }
+
+    this.resize();
   },
 
   highlight: function(loc) {
@@ -256,10 +354,10 @@ var Display = React.createClass({
 
   resize: function() {
     var root = this.getDOMNode();
-    var canvas = $(root).find('canvas')[0];
+    var iframe = $(root).find('iframe')[0];
     var rect = root.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
+    iframe.width = rect.width;
+    iframe.height = rect.height;
   },
 
   render: function() {
@@ -267,7 +365,7 @@ var Display = React.createClass({
     return dom.div(
       { className: cls },
       dom.div({ className: 'inner' },
-              dom.canvas())
+              dom.iframe())
     );
   }
 });
@@ -308,12 +406,14 @@ var Toolset = React.createClass({
       Debugger({ ref: 'debugger',
                  className: classes('debugger', activeClass('debugger', 'show')),
                  onClose: this.closeTool,
+                 client: this.props.client,
                  getConsole: this.getTool.bind(this, 'console'),
                  getEditor: this.props.getEditor }),
       Console({ ref: 'console',
                 className: classes('console',
                                    activeClass('console', 'show'),
                                    activeClass('debugger', 'show with-debugger')),
+                client: this.props.client,
                 getDebugger: this.getTool.bind(this, 'debugger'),
                 onClose: this.closeTool })
     );
@@ -327,71 +427,77 @@ var Debugger = React.createClass({
              scope: [] };
   },
 
-  componentDidMount: function() {
-    VM.onStep = function() {
-      this.props.getEditor().highlight(VM.getLocation());
-      this.printReport();
-    }.bind(this);
+  componentDidUpdate: function(prevProps) {
+    if(prevProps.client !== this.props.client) {
+      var client = this.props.client;
 
-    VM.onFinish = function() {
-      this.props.getEditor().highlight(null);
-      this.printReport();
-      this.props.getConsole().flush();      
-    }.bind(this);
+      client.on('error', function(err, loc) {
+        this.handleError(err, loc);
+      }.bind(this));
 
-    VM.onError = function(e) {
-      this.handleError(e);      
-    }.bind(this);
+      client.on('finish', function() {
+        this.props.getEditor().highlight(null);
+        this.printReport();
+      }.bind(this));
+    }
   },
 
   continue: function() {
-    VM.run();
-    this.props.getConsole().flush();
+    this.props.client.send({ type: 'continue' });
+    this.props.getEditor().highlight(null);
   },
 
   step: function() {
-    VM.step();
-    this.props.getConsole().flush();
+    this.props.client.send({ type: 'step' });
   },
 
   stepOver: function() {
-    VM.stepOver();
-    this.props.getConsole().flush();
+    this.props.client.send({ type: 'stepOver' });
   },
 
-  handleError: function(e) {
-    console.log(e.stack);
-
-    if(VM.getLocation()) {
-      this.props.getEditor().highlight(VM.getLocation());
+  handleError: function(err, loc) {
+    if(loc) {
+      this.props.getEditor().highlight(loc);
     }
 
-    //console.log(e.toString());
-    this.props.getConsole().log(e.toString(), true);
+    this.props.getConsole().log(err.toString());
     this.printReport();
   },
 
   printReport: function() {
-    if(VM.state !== VM.IDLE) {
-      var frame = VM.getRootFrame();
-      var top = VM.getTopFrame();
-      var src = this.props.getEditor().getValue();
-      var scope = _.uniq(_.keys(top.scope).concat(top.outerScope)).map(function(name) {
-        var value = top.evaluate(name).result;
-        return [name, this.props.getConsole().format(value)];
-      }.bind(this));
+    var client = this.props.client;
 
-      this.setState({
-        stack: frame.stackReduce(function(acc, frame) {
-          if(frame.name != 'top-level') {
-            acc.push(frame.name + ': ' + frame.getExpression(src));
+    client.send({
+      type: 'query',
+      args: ['state,stack,scope']
+    }, function(state, stack, scope) {
+      if(state !== 'idle') {
+        var srclines = this.props.getEditor().getValue().split('\n');
+
+        this.props.client.send({
+          type: 'eval',
+          args: ['[' + scope.join(',') + ']']
+        }, function(res) {
+          this.setState({
+            scope: _.zip(scope, res.result)
+          });
+        }.bind(this));
+
+        this.setState({
+          stack: stack.reduce(function(acc, frame) {
+            if(frame.name != 'top-level') {
+              var line = srclines[frame.loc.start.line - 1];
+              acc.push(frame.name + ': ' +
+                       line.slice(frame.loc.start.column,
+                                  frame.loc.end.column));
+              return acc;
+            }
             return acc;
-          }
-          return acc;
-        }, []),
-        scope: scope
-      });
-    }
+          }, []),
+          runstate: state
+        });
+      }
+    }.bind(this));
   },
 
   render: function() {
@@ -399,7 +505,7 @@ var Debugger = React.createClass({
     var childs = [];
     var state = this.state;
 
-    if(VM.state === VM.SUSPENDED) {
+    if(this.state.runstate == 'suspended') {
       childs = childs.concat([
         dom.div(
           { className: 'buttons' },
@@ -432,7 +538,7 @@ var Debugger = React.createClass({
                           }))))
       ]);
     }
-    else if(VM.state === VM.IDLE) {
+    else {
       childs.push(dom.div({ className: 'disabled' },
                           "program not running"));
     }
@@ -448,36 +554,16 @@ var Console = React.createClass({
              output: '' };
   },
 
-  componentDidMount: function() {
-    var fakeConsole = this._fakeConsole = {
-      _buffer: [],
-
-      log: function() {
-        var str = '> ' + Array.prototype.slice.call(arguments).join(' ');
-        fakeConsole._buffer.push(str);
-      },
-
-      flush: function() {
-        var cur = fakeConsole.cleared ? '' : this.state.output;
-        
-        if(fakeConsole._buffer.length) {
-          cur = (cur ? cur + '\n' : cur) + fakeConsole._buffer.join('\n');
-        }
-
-        this.setState({
-          output: cur
-        });
-
-        fakeConsole._buffer = [];
-        fakeConsole.cleared = false;
-      }.bind(this)
-    };
-  },
-
   componentDidUpdate: function(prevProps, prevState) {
     if(prevState.output !== this.state.output) {
       var node = $(this.getDOMNode()).find('.output');
       node.scrollTop(node.children('.inner').height());
+    }
+
+    if(prevProps.client !== this.props.client) {
+      this.props.client.on('log', function(msg) {
+        this.log(msg);
+      }.bind(this));
     }
   },
 
@@ -486,12 +572,7 @@ var Console = React.createClass({
   },
 
   clear: function() {
-    this._fakeConsole._buffer = ['> // this is your console. type anything below'];
-    this._fakeConsole.cleared = true;
-  },
-
-  flush: function() {
-    this._fakeConsole.flush();
+    this.setState({ output: '' });
   },
 
   handleInput: function(e) {
@@ -499,56 +580,24 @@ var Console = React.createClass({
   },
 
   log: function(str, buffered) {
-    if(buffered) {
-      this._fakeConsole.log(str);
-    }
-    else {
-      var cur = this.state.output;
-      this.setState({
-        output: cur ? (cur + '\n' + str) : str
-      });
-    }
-  },
-
-  format: function(obj) {
-    if(obj === undefined) {
-      return 'undefined';
-    }
-    else if(obj === null) {
-      return 'null';
-    }
-    else if(_.isFunction(obj)) {
-      return '<func>';
-    }
-    else {
-      var str;
-
-      if(typeof obj === 'object') {
-        str = obj.toSource ? obj.toSource() : obj.toString();
-      }
-      else {
-        str = obj.toString();
-      }
-
-      if(str.length > 100) {
-        str = str.slice(0, 100) + '...';
-      }
-      return str;
-    }
+    var cur = this.state.output;
+    this.setState({
+      output: cur ? (cur + '\n' + str) : str
+    });
   },
 
   evaluate: function(e) {
     e.preventDefault();
-    try {
-      this.log(this.state.input + ' == ' + 
-               this.format(VM.evaluate(this.state.input)));
-    }
-    catch(e) {
-      this.log(e.toString());
-    }
+    var client = this.props.client;
 
-    this.setState({ input: '' });
-    this.props.getDebugger().printReport();
+    client.send({
+      type: 'eval',
+      args: [this.state.input]
+    }, function(err, res) {
+      this.log(this.state.input + '\n' + res.result);
+      this.setState({ input: '' });
+      this.props.getDebugger().printReport();
+    }.bind(this));
   },
 
   render: function() {
@@ -575,6 +624,9 @@ var Footer = React.createClass({
                    dom.button({ className: 'btn btn-success',
                                 onClick: this.props.onRun },
                               "RUN"),
+                   dom.button({ className: 'btn btn-success',
+                                onClick: this.props.onRunExpression },
+                              "RUN EXPRESSION"),
                    dom.button({ className: 'btn btn-success',
                                 onClick: this.props.onClear },
                               "CLEAR"),

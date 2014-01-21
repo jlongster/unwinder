@@ -1,0 +1,3 @@
+
+test:
+	node tests/run

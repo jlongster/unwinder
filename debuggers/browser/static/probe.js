@@ -3,105 +3,98 @@ var types = require("ast-types");
 var b = types.builders;
 
 function locToSyntax(loc) {
-    return b.objectExpression([
+  return b.objectExpression([
+    b.property(
+      'init',
+      b.literal('start'),
+      b.objectExpression([
         b.property(
-            'init',
-            b.literal('start'),
-            b.objectExpression([
-                b.property(
-                    'init',
-                    b.literal('line'),
-                    b.literal(loc.start.line)
-                ),
-                b.property(
-                    'init',
-                    b.literal('column'),
-                    b.literal(loc.start.column)
-                )
-            ])
+          'init',
+          b.literal('line'),
+          b.literal(loc.start.line)
         ),
-
         b.property(
-            'init',
-            b.literal('end'),
-            b.objectExpression([
-                b.property(
-                    'init',
-                    b.literal('line'),
-                    b.literal(loc.end.line)
-                ),
-                b.property(
-                    'init',
-                    b.literal('column'),
-                    b.literal(loc.end.column)
-                )
-            ])
+          'init',
+          b.literal('column'),
+          b.literal(loc.start.column)
         )
-    ]);
+      ])
+    ),
+
+    b.property(
+      'init',
+      b.literal('end'),
+      b.objectExpression([
+        b.property(
+          'init',
+          b.literal('line'),
+          b.literal(loc.end.line)
+        ),
+        b.property(
+          'init',
+          b.literal('column'),
+          b.literal(loc.end.column)
+        )
+      ])
+    )
+  ]);
 }
 
 function DebugInfo() {
-    this.baseId = 0;
-    this.baseIndex = 1;
-    this.machines = [];
-    this.stmts = [];
+  this.baseId = 0;
+  this.baseIndex = 1;
+  this.machines = [];
+  this.stmts = [];
 }
 
 DebugInfo.prototype.makeId = function() {
-    var id = this.baseId++;
-    this.machines[id] = {
-        locs: {},
-        finalLoc: null
-    };
-    return id;
-};
-
-DebugInfo.prototype.resolveLoc = function(machineId, stmt, index) {
-    this.stmts.some(function(s) {
-        if(stmt === s) {
-            this.addSourceLocation(machineId, stmt.loc, index);
-            return true;
-        }
-    }.bind(this));
+  var id = this.baseId++;
+  this.machines[id] = {
+    locs: {},
+    finalLoc: null
+  };
+  return id;
 };
 
 DebugInfo.prototype.addSourceLocation = function(machineId, loc, index) {
-    this.machines[machineId].locs[index] = loc;
-    return index;
+  this.machines[machineId].locs[index] = loc;
+  return index;
+};
+
+DebugInfo.prototype.getSourceLocation = function(machineId, index) {
+  return this.machines[machineId].locs[index];
 };
 
 DebugInfo.prototype.addFinalLocation = function(machineId, loc) {
-    this.machines[machineId].finalLoc = loc;
+  this.machines[machineId].finalLoc = loc;
 };
 
 DebugInfo.prototype.getDebugAST = function() {
-    return b.expressionStatement(
-        b.callExpression(
-            b.memberExpression(b.identifier('VM'),
-                               b.identifier('setDebugInfo'),
-                               false),
-            [b.arrayExpression(this.machines.map(function(machine, i) {
-              return b.objectExpression([
-                b.property(
-                  'init',
-                  b.literal('finalLoc'),
-                  b.literal(machine.finalLoc)
-                ),
-                b.property(
-                  'init',
-                  b.literal('locs'),
-                  b.objectExpression(Object.keys(machine.locs).map(function(k) {
-                    return b.property(
-                      'init',
-                      b.literal(k),
-                      locToSyntax(machine.locs[k])
-                    );
-                  }))
-                )
-              ]);
-            }.bind(this)))]
-        )
-    );
+  return b.variableDeclaration(
+    'var',
+    [b.variableDeclarator(
+      b.identifier('__debugInfo'),
+      b.arrayExpression(this.machines.map(function(machine, i) {
+        return b.objectExpression([
+          b.property(
+            'init',
+            b.literal('finalLoc'),
+            b.literal(machine.finalLoc)
+          ),
+          b.property(
+            'init',
+            b.literal('locs'),
+            b.objectExpression(Object.keys(machine.locs).map(function(k) {
+              return b.property(
+                'init',
+                b.literal(k),
+                locToSyntax(machine.locs[k])
+              );
+            }))
+          )
+        ]);
+      }.bind(this))))]
+  );
 };
 
 DebugInfo.prototype.getDebugInfo = function() {
@@ -389,10 +382,10 @@ Ep.makeTempId = function() {
     return b.identifier("$t" + nextTempId++)
 };
 
-Ep.getMachine = function(funcName, varNames, scope) {
+Ep.getMachine = function(funcName, varNames, scope, limitToPoint) {
   return {
     contextId: this.contextId.name,
-    ast: this.getDispatchLoop(funcName, varNames, scope)
+    ast: this.getDispatchLoop(funcName, varNames, scope, limitToPoint)
   };
 };
 
@@ -436,10 +429,8 @@ Ep.resolveEmptyJumps = function() {
 //
 // Each marked location in this.listing will correspond to one generated
 // case statement.
-Ep.getDispatchLoop = function(funcName, varNames, scope) {
+Ep.getDispatchLoop = function(funcName, varNames, scope, limitToPoint) {
   var self = this;
-  var cases = [];
-  var current;
 
   // If we encounter a break, continue, or return statement in a switch
   // case, we can skip the rest of the statements until the next case.
@@ -449,39 +440,74 @@ Ep.getDispatchLoop = function(funcName, varNames, scope) {
   // the original loc jump straight to it
   self.resolveEmptyJumps();
 
-  self.listing.forEach(function(stmt, i) {
-    if (self.marked.hasOwnProperty(i)) {
-      cases.push(b.switchCase(
-        b.literal(i),
-        current = []
-      ));
-      alreadyEnded = false;
+  var cases = [];
+  for(var i=0; i<self.listing.length;) {
+    var stmt = self.listing[i];
+    var skip = false;
+
+    // This is hacky but works for now. Allow the ability to "select"
+    // only parts of code but specifying a position and only
+    // outputting all forms that match it.
+    var loc = this.debugInfo.getSourceLocation(this.debugId, i);
+    if(limitToPoint && loc &&
+       (loc.start.line > limitToPoint.line ||
+        loc.start.column > limitToPoint.column ||
+        loc.end.line < limitToPoint.line ||
+        loc.end.column < limitToPoint.column)) {
+      i++;
+      while(!self.marked.hasOwnProperty(i) && i < self.listing.length) { i++; }
+      continue;
     }
 
-    if (!alreadyEnded) {
-      current.push(stmt);
-      if (isSwitchCaseEnder(stmt))
-        alreadyEnded = true;
+    var kase = b.switchCase(
+      b.literal(i),
+      [stmt]
+    );
+    cases.push(kase);
+    i++;
+
+    while(!self.marked.hasOwnProperty(i) && i < self.listing.length) {
+      kase.consequent.push(self.listing[i]);
+      i++;
+
+      // If we encounter a break, continue, or return statement in a
+      // switch case, we can skip the rest of the statements until the
+      // next case.
+      if(isSwitchCaseEnder(self.listing[i])) {
+        while(!self.marked.hasOwnProperty(i) && i < self.listing.length) { i++; }
+        break;
+      }
     }
-  });
+  }
+
 
   // Now that we know how many statements there will be in this.listing,
   // we can finally resolve this.finalLoc.value.
   this.finalLoc.value = this.listing.length;
   this.debugInfo.addFinalLocation(this.debugId, this.finalLoc.value);
 
-  cases.push(
-    b.switchCase(this.finalLoc, [
-      // Clean up the function
-      self.assign(self.getProperty(funcName, '$ctx'),
-                  b.identifier('undefined')),
+  if(funcName === '$__root') {
+    // If global scope, simply fall through and return a frame object
+    cases.push(b.switchCase(null, [
+      self.assign(self.vmProperty('stepping'), b.literal(true)),
+      b.breakStatement()
+    ]));
+  }
+  else {
+    cases.push.apply(cases, [
+      b.switchCase(null, []),
+      b.switchCase(this.finalLoc, [
+        // Clean up the function
+        self.assign(self.getProperty(funcName, '$ctx'),
+                    b.identifier('undefined')),
 
-      // This will check/clear both context.thrown and context.rval.
-      b.returnStatement(
-        b.callExpression(this.contextProperty("stop"), [])
-      )
-    ])
-  );
+        // This will check/clear both context.thrown and context.rval.
+        b.returnStatement(
+          b.callExpression(this.contextProperty("stop"), [])
+        )
+      ])
+    ]);
+  }
 
   // add an "eval" location
   cases.push(
@@ -496,82 +522,10 @@ Ep.getDispatchLoop = function(funcName, varNames, scope) {
     ])
   );
 
-  // restoring a frame
-  var restoration = varNames.map(function(v) {
-    return b.expressionStatement(
-      b.assignmentExpression(
-        '=',
-        b.identifier(v),
-        self.getProperty(
-          self.getProperty(self.contextProperty('frame'), 'scope'), v
-        )
-      )
-    );
-  }).concat([
-    self.declareVar('$child', self.getProperty(self.contextProperty('frame'), 'child')),
-    b.ifStatement(
-      b.identifier('$child'),
-      b.blockStatement([
-        self.declareVar('$child$ctx', self.getProperty('$child', 'ctx')),
-        self.assign(self.getProperty(self.getProperty('$child', 'fn'), '$ctx'),
-                    b.identifier('$child$ctx')),
-        b.expressionStatement(
-          b.callExpression(
-            self.getProperty(self.getProperty('$child', 'fn'), 'call'),
-            [self.getProperty('$child', 'thisPtr')]
-          )
-        ),
-
-        b.ifStatement(
-          self.getProperty('$child$ctx', 'frame'),
-          b.blockStatement([
-            self.assign(self.getProperty(self.contextProperty('frame'), 'child'),
-                        self.getProperty('$child$ctx', 'frame')),
-            b.returnStatement(null)
-          ]),
-          b.blockStatement([
-            self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
-            self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null)),
-            self.assign(self.getProperty('$ctx',
-                                         self.contextProperty('resultLoc'),
-                                         true),
-                        self.getProperty('$child$ctx', 'rval')),
-            // if we are stepping, stop executing here so that it
-            // pauses on the "return" instruction
-            b.ifStatement(self.vmProperty('stepping'),
-                          b.throwStatement(b.literal(null)))
-          ])
-        )
-      ]),
-      b.blockStatement([
-        b.ifStatement(
-          self.contextProperty('staticBreakpoint'),
-          self.assign(
-            self.getProperty('$ctx', 'next'),
-            b.binaryExpression('+', self.getProperty('$ctx', 'next'), b.literal(3))
-          )
-        ),
-        self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
-        self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null))
-      ])
-    )
-  ]);
-
   return [
     // the state machine, wrapped in a try/catch
     b.tryStatement(
       b.blockStatement([
-        b.ifStatement(
-          self.contextProperty('frame'),
-          b.blockStatement(restoration),
-          b.ifStatement(
-            // if we are stepping, stop executing so it is stopped at
-            // the first instruction of the new frame
-            self.vmProperty('stepping'),
-            b.throwStatement(b.literal(null))
-          )
-        ),
-
         b.whileStatement(
           b.literal(1),
           b.blockStatement([
@@ -622,7 +576,7 @@ Ep.getDispatchLoop = function(funcName, varNames, scope) {
         '=',
         self.contextProperty('frame'),
         b.newExpression(
-          self.vmProperty('Frame'),
+          b.identifier('$Frame'),
           [b.literal(this.debugId),
            b.literal(funcName),
            b.identifier(funcName),
@@ -1624,10 +1578,7 @@ exports.hoist = function(fun) {
       if (n.BlockStatement.check(this.parent.node)) {
         // unshift because later it will be added in reverse, so this
         // will keep the original order
-        funDeclsToRaise.unshift({
-          block: this.parent.node,
-          assignment: assignment
-        });
+        funDeclsToRaise.unshift(assignment);
 
         // Remove the function declaration for now, but reinsert the assignment
         // form later, at the top of the enclosing BlockStatement.
@@ -1644,10 +1595,6 @@ exports.hoist = function(fun) {
       // Don't descend into nested function expressions.
       return false;
     }
-  });
-
-  funDeclsToRaise.forEach(function(entry) {
-    entry.block.body.unshift(entry.assignment);
   });
 
   var paramNames = {};
@@ -1672,7 +1619,10 @@ exports.hoist = function(fun) {
     return null; // Be sure to handle this case!
   }
 
-  return b.variableDeclaration("var", declarations);
+  return {
+    vars: b.variableDeclaration("var", declarations),
+    funs: funDeclsToRaise
+  };
 };
 
 },{"./util":6,"assert":63,"ast-types":19}],4:[function(require,module,exports){
@@ -2131,28 +2081,36 @@ var hoist = require("./hoist").hoist;
 var Emitter = require("./emit").Emitter;
 var DebugInfo = require("./debug").DebugInfo;
 
-exports.transform = function(ast, withDebugInfo) {
+exports.transform = function(ast, opts) {
   n.Program.assert(ast);
 
   var debugInfo = new DebugInfo();
-  var rootFn = types.traverse(
-    b.functionExpression(
-      null, [],
+  var nodes = ast.body;
+
+  if(opts.asRoot) {
+    nodes = b.functionExpression(
+      opts.asRoot ? b.identifier('$__root') : null,
+      [],
       b.blockStatement(ast.body)
-    ),
+    );
+  }
+
+  var rootFn = types.traverse(
+    nodes,
     function(node) {
-      return visitNode(node, [], debugInfo);
+      return visitNode(node, [], debugInfo, opts.exprAtPoint);
     }
   );
 
-  var body = withDebugInfo ? [debugInfo.getDebugAST()] : [];
-  ast.body = body.concat([
-    b.expressionStatement(
-      b.callExpression(
-        b.memberExpression(b.identifier('VM'), b.identifier('invokeRoot'), false),
-        [rootFn, b.identifier('this')]
-      )
-    )]);
+  if(opts.asRoot) {
+    rootFn = [b.expressionStatement(
+      b.sequenceExpression([rootFn])
+    )];
+  }
+
+  var body = opts.includeDebug ? [debugInfo.getDebugAST()] : [];
+  body = body.concat(rootFn);
+  ast.body = body;
 
   return {
     ast: ast,
@@ -2165,7 +2123,7 @@ function newFunctionName() {
   return b.identifier('$anon' + id++);
 }
 
-function visitNode(node, scope, debugInfo) {
+function visitNode(node, scope, debugInfo, exprAtPoint) {
   if (!n.Function.check(node)) {
     // Note that because we are not returning false here the traversal
     // will continue into the subtree rooted at this node, as desired.
@@ -2184,10 +2142,12 @@ function visitNode(node, scope, debugInfo) {
   }
 
   // TODO: Ensure these identifiers are named uniquely.
-  var contextId = b.identifier("$ctx");
   var nameId = node.id;
   node.id = node.id || newFunctionName();
-  var vars = hoist(node);
+  var contextId = b.identifier("$ctx");
+  var hoisted = hoist(node);
+  var vars = hoisted.vars;
+  var funs = hoisted.funs;
   var argNames = node.params.map(function(v) { return v.name; });
   var varNames = !vars ? argNames : argNames.concat(
     vars.declarations.map(function(v) {
@@ -2201,8 +2161,8 @@ function visitNode(node, scope, debugInfo) {
   emitter.explode(path.get("body"));
 
   var machine = emitter.getMachine(node.id.name, varNames, scope);
-
   var inner = vars ? [vars] : [];
+  
   inner.push.apply(inner, [
     b.variableDeclaration('var', [
       b.variableDeclarator(
@@ -2217,9 +2177,9 @@ function visitNode(node, scope, debugInfo) {
       b.returnStatement(
         b.callExpression(
           b.memberExpression(b.identifier('VM'),
-                             b.identifier('invokeRoot'),
+                             b.identifier('runProgram'),
                              false),
-          [node.id]
+          [node.id, b.identifier('arguments')]
         )
       )
     ),
@@ -2233,14 +2193,94 @@ function visitNode(node, scope, debugInfo) {
     )
   ]);
 
+  addRestoration(emitter, varNames, inner);
+  inner.push.apply(inner, funs);
+
   node.body = b.blockStatement(inner.concat(
     types.traverse(machine.ast, function(node) {
       return visitNode(node,
                        varNames.concat(scope),
-                       debugInfo);
+                       debugInfo,
+                       exprAtPoint);
     })
   ));
   return false;
+}
+
+function addRestoration(self, varNames, arr) {
+  // restoring a frame
+  var restoration = varNames.map(function(v) {
+    return b.expressionStatement(
+      b.assignmentExpression(
+        '=',
+        b.identifier(v),
+        self.getProperty(
+          self.getProperty(self.contextProperty('frame'), 'scope'), v
+        )
+      )
+    );
+  }).concat([
+    self.declareVar('$child', self.getProperty(self.contextProperty('frame'), 'child')),
+    b.ifStatement(
+      b.identifier('$child'),
+      b.blockStatement([
+        self.declareVar('$child$ctx', self.getProperty('$child', 'ctx')),
+        self.assign(self.getProperty(self.getProperty('$child', 'fn'), '$ctx'),
+                    b.identifier('$child$ctx')),
+        b.expressionStatement(
+          b.callExpression(
+            self.getProperty(self.getProperty('$child', 'fn'), 'call'),
+            [self.getProperty('$child', 'thisPtr')]
+          )
+        ),
+
+        b.ifStatement(
+          self.getProperty('$child$ctx', 'frame'),
+          b.blockStatement([
+            self.assign(self.getProperty(self.contextProperty('frame'), 'child'),
+                        self.getProperty('$child$ctx', 'frame')),
+            b.returnStatement(null)
+          ]),
+          b.blockStatement([
+            self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
+            self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null)),
+            self.assign(self.getProperty('$ctx',
+                                         self.contextProperty('resultLoc'),
+                                         true),
+                        self.getProperty('$child$ctx', 'rval')),
+            // if we are stepping, stop executing here so that it
+            // pauses on the "return" instruction
+            b.ifStatement(self.vmProperty('stepping'),
+                          b.throwStatement(b.literal(null)))
+          ])
+        )
+      ]),
+      b.blockStatement([
+        b.ifStatement(
+          self.contextProperty('staticBreakpoint'),
+          self.assign(
+            self.getProperty('$ctx', 'next'),
+            b.binaryExpression('+', self.getProperty('$ctx', 'next'), b.literal(3))
+          )
+        ),
+        self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
+        self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null))
+      ])
+    )
+  ]);
+
+  arr.push.apply(arr, [
+    b.ifStatement(
+      self.contextProperty('frame'),
+      b.blockStatement(restoration),
+      b.ifStatement(
+        // if we are stepping, stop executing so it is stopped at
+        // the first instruction of the new frame
+        self.vmProperty('stepping'),
+        b.throwStatement(b.literal(null))
+      )
+    )
+  ]);
 }
 
 function renameIdentifier(func, id, newId) {
@@ -2289,6 +2329,8 @@ var __dirname="/";/**
 var assert = require("assert");
 var path = require("path");
 var fs = require("fs");
+var types = require("ast-types");
+var b = types.builders;
 var transform = require("./lib/visit").transform;
 var utils = require("./lib/util");
 var recast = require("recast");
@@ -2306,14 +2348,11 @@ function regenerator(source, options) {
     includeRuntime: false,
     supportBlockBinding: true
   });
+  options.asRoot = true;
 
   var runtime = options.includeRuntime ? fs.readFileSync(
     regenerator.runtime.dev, "utf-8"
   ) + "\n" : "";
-
-  // if (!genFunExp.test(source)) {
-  //   return runtime + source; // Shortcut: no generators to transform.
-  // }
 
   var runtimeBody = recast.parse(runtime, {
     sourceFileName: regenerator.runtime.dev
@@ -2353,18 +2392,22 @@ function regenerator(source, options) {
     }
   }
 
-  var transformed = transform(ast, options.includeDebug);
+  var transformed = transform(ast, options);
   recastAst.program = transformed.ast;
+  var appendix = '';
 
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
   if (options.includeRuntime) {
     var body = recastAst.program.body;
     body.unshift.apply(body, runtimeBody);
+
+    appendix += 'var VM = new $Machine();' +
+      'VM.beginFunc($__root, new $DebugInfo(__debugInfo));';
   }
 
   return {
-    code: recast.print(recastAst, recastOptions).code,
+    code: recast.print(recastAst, recastOptions).code + '\n' + appendix,
     debugInfo: transformed.debugInfo
   };
 }
@@ -2380,7 +2423,7 @@ regenerator.runtime = {
 // To transform a string of ES6 code, call require("regenerator")(source);
 module.exports = regenerator;
 
-},{"./lib/util":6,"./lib/visit":7,"assert":63,"defs":23,"esprima":38,"fs":62,"path":66,"recast":50}],9:[function(require,module,exports){
+},{"./lib/util":6,"./lib/visit":7,"assert":63,"ast-types":19,"defs":23,"esprima":38,"fs":62,"path":66,"recast":50}],9:[function(require,module,exports){
 var types = require("../lib/types");
 var Type = types.Type;
 var def = Type.def;

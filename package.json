@@ -37,7 +37,8 @@
   },
   "devDependencies": {
     "mocha": "~1.13.0",
-    "semver": "~2.1.0"
+    "semver": "~2.1.0",
+    "expect": "0.0.2"
   },
   "license": "BSD",
   "engines": {

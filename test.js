@@ -1,7 +1,9 @@
 
 function foo() {
-  console.log("hi");
+  var x = 10;
+  var y = 20;
+  debugger;
+  return x = y;
 }
 
-foo();
-setInterval(foo, 1000);
+console.log(foo());

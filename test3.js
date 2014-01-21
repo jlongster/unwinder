@@ -37,4 +37,4 @@ function foo() {
   return bar(10000);
 }
 
-console.log(foo());
+
