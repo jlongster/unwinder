@@ -2,6 +2,15 @@
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
 
+  // since eval is used, need access to the compiler
+
+  if(typeof module !== 'undefined') {
+    var compiler = require('../main.js');
+  }
+  else {
+    var compiler = main.js;
+  }
+
   // vm
 
   var IDLE = 'idle';
@@ -32,9 +41,10 @@
     this.state = EXECUTING;
 
     if(debugInfo) {
-      this.setDebugInfo(debugInfo);
+      this.setDebugInfo(new DebugInfo(debugInfo));
     }
 
+    var prevStepping = this.stepping;
     this.stepping = false;
 
     var ctx = fn.$ctx = this.getContext();
@@ -47,6 +57,7 @@
     }
 
     this.checkStatus(ctx);
+    this.stepping = prevStepping;
 
     // clean up the function, since this property is used to tell if
     // we are inside our VM or not
@@ -84,6 +95,7 @@
       this.hasBreakpoints = true;
       this.stepping = false;
       nextFrame.restore();
+      this.rootFrame = null;
       this.checkStatus(nextFrame.ctx);
     }
   };
@@ -155,7 +167,8 @@
     if(expr === '$_') {
       return this.lastEval;
     }
-    else if(this.rootFrame) {
+
+    if(this.rootFrame) {
       var top = this.getTopFrame();
       var res = top.evaluate(this, expr);
 
@@ -174,6 +187,27 @@
       this.rootFrame.name = '<top-level>';
       this.lastEval = res.result;
       return this.lastEval;
+    }
+    else if(this.globalFn) {
+      // TODO: seek out functions, compile them, and convert them to
+      // assignments
+
+      if(expr.indexOf('function') !== -1) {
+        expr = compiler(expr).code;
+      }
+
+      this.evalArg = expr;
+      this.stepping = true;
+      
+      var ctx = this.getContext();
+      ctx.softReset();
+      ctx.next = -1;
+      ctx.frame = true;
+
+      this.globalFn.$ctx = ctx;
+      (0, this).globalFn();
+
+      return ctx.rval;
     }
   };
 
@@ -339,13 +373,13 @@
 
   // frame
 
-  function Frame(machineId, name, fn, scope, outerScope,
+  function Frame(machineId, name, fn, state, scope,
                  thisPtr, ctx, child) {
     this.machineId = machineId;
     this.name = name;
     this.fn = fn;
+    this.state = state;
     this.scope = scope;
-    this.outerScope = outerScope;
     this.thisPtr = thisPtr;
     this.ctx = ctx;
     this.child = child;

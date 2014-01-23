@@ -1,34 +1,24 @@
 
+var x = 0;
+var foo;
 
-function main(restore) {
-  var x;
-
-  if(restore) {
-    x = restore.x;
+function global(n) {
+  if(n == 1) {
+    function foo() {
+      x++;
+    }
   }
-
-  function foo() {
-    console.log(x);
-    x++;
-  }
-
-  if(restore) {
-    eval(restore.expr);
-  }
-  else {
-    x = 0;
-    foo();
-    foo();
+  else if(n == 2) {
     foo();
   }
+  else if(n == 3) {
+    eval('function foo() {' +
+         ' x += 2;' +
+        '}');
+  }
+};
 
-  console.log('EXITING: ' + x);
-  return x;
-}
-
-var restore = {
-  x: main(),
-  expr: 'foo()'
-}
-
-main(restore);
+global(1);
+global(3);
+global(2);
+console.log(x);

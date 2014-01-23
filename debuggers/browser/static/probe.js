@@ -382,10 +382,10 @@ Ep.makeTempId = function() {
     return b.identifier("$t" + nextTempId++)
 };
 
-Ep.getMachine = function(funcName, varNames, scope, limitToPoint) {
+Ep.getMachine = function(funcName, varNames, limitToPoint) {
   return {
     contextId: this.contextId.name,
-    ast: this.getDispatchLoop(funcName, varNames, scope, limitToPoint)
+    ast: this.getDispatchLoop(funcName, varNames, limitToPoint)
   };
 };
 
@@ -429,57 +429,35 @@ Ep.resolveEmptyJumps = function() {
 //
 // Each marked location in this.listing will correspond to one generated
 // case statement.
-Ep.getDispatchLoop = function(funcName, varNames, scope, limitToPoint) {
+Ep.getDispatchLoop = function(funcName, varNames, limitToPoint) {
   var self = this;
+
+  // The limitToPoint option is not used yet. It is a attempt to
+  // partially evaluate code, but I doubt we should do it this way.
+  // Keep it in for now, but I'll probably remove it in the future.
 
   // If we encounter a break, continue, or return statement in a switch
   // case, we can skip the rest of the statements until the next case.
-  var alreadyEnded = false;
+  var alreadyEnded = false, current, cases = [];
 
   // If a case statement will just forward to another location, make
   // the original loc jump straight to it
   self.resolveEmptyJumps();
 
-  var cases = [];
-  for(var i=0; i<self.listing.length;) {
-    var stmt = self.listing[i];
-    var skip = false;
-
-    // This is hacky but works for now. Allow the ability to "select"
-    // only parts of code but specifying a position and only
-    // outputting all forms that match it.
-    var loc = this.debugInfo.getSourceLocation(this.debugId, i);
-    if(limitToPoint && loc &&
-       (loc.start.line > limitToPoint.line ||
-        loc.start.column > limitToPoint.column ||
-        loc.end.line < limitToPoint.line ||
-        loc.end.column < limitToPoint.column)) {
-      i++;
-      while(!self.marked.hasOwnProperty(i) && i < self.listing.length) { i++; }
-      continue;
+  self.listing.forEach(function(stmt, i) {
+    if (self.marked.hasOwnProperty(i)) {
+      cases.push(b.switchCase(
+        b.literal(i),
+        current = []));
+      alreadyEnded = false;
     }
 
-    var kase = b.switchCase(
-      b.literal(i),
-      [stmt]
-    );
-    cases.push(kase);
-    i++;
-
-    while(!self.marked.hasOwnProperty(i) && i < self.listing.length) {
-      kase.consequent.push(self.listing[i]);
-      i++;
-
-      // If we encounter a break, continue, or return statement in a
-      // switch case, we can skip the rest of the statements until the
-      // next case.
-      if(isSwitchCaseEnder(self.listing[i])) {
-        while(!self.marked.hasOwnProperty(i) && i < self.listing.length) { i++; }
-        break;
-      }
+    if (!alreadyEnded) {
+      current.push(stmt);
+      if (isSwitchCaseEnder(stmt))
+        alreadyEnded = true;
     }
-  }
-
+  });
 
   // Now that we know how many statements there will be in this.listing,
   // we can finally resolve this.finalLoc.value.
@@ -523,82 +501,38 @@ Ep.getDispatchLoop = function(funcName, varNames, scope, limitToPoint) {
   );
 
   return [
-    // the state machine, wrapped in a try/catch
-    b.tryStatement(
+    // the state machine
+    b.whileStatement(
+      b.literal(1),
       b.blockStatement([
-        b.whileStatement(
-          b.literal(1),
-          b.blockStatement([
-            b.ifStatement(
-              b.logicalExpression(
-                '&&',
-                self.vmProperty('hasBreakpoints'),
-                b.binaryExpression(
-                  '!==',
-                  self.getProperty(
-                    self.getProperty(self.vmProperty('machineBreaks'),
-                                     b.literal(this.debugId),
-                                     true),
-                    self.contextProperty('next'),
-                    true
-                  ),
-                  // is identifier right here? it doesn't seem right
-                  b.identifier('undefined')
-                )
+        b.ifStatement(
+          b.logicalExpression(
+            '&&',
+            self.vmProperty('hasBreakpoints'),
+            b.binaryExpression(
+              '!==',
+              self.getProperty(
+                self.getProperty(self.vmProperty('machineBreaks'),
+                                 b.literal(this.debugId),
+                                 true),
+                self.contextProperty('next'),
+                true
               ),
-              b.breakStatement()
-            ),
-
-            b.switchStatement(self.contextProperty('next'), cases),
-
-            b.ifStatement(
-              self.vmProperty('stepping'),
-              b.breakStatement()
+              // is identifier right here? it doesn't seem right
+              b.identifier('undefined')
             )
-          ])
-        )
-      ]),
-      b.catchClause(b.identifier('e'), null, b.blockStatement([
-        b.expressionStatement(
-          b.assignmentExpression(
-            '=',
-            b.memberExpression(b.identifier('VM'), b.identifier('error'), false),
-            b.identifier('e')
-          )
-        )
-      ]))
-    ),
+          ),
+          b.breakStatement()
+        ),
 
-    // if it falls out of the loops, that means we've paused so create
-    // a frame
-    b.expressionStatement(
-      b.assignmentExpression(
-        '=',
-        self.contextProperty('frame'),
-        b.newExpression(
-          b.identifier('$Frame'),
-          [b.literal(this.debugId),
-           b.literal(funcName),
-           b.identifier(funcName),
-           b.objectExpression(
-             varNames.map(function(name) {
-               return b.property(
-                 'init',
-                 b.literal(name),
-                 b.identifier(name)
-               );
-             })
-           ),
-           b.arrayExpression(scope.map(function(v) { return b.literal(v); })),
-           b.thisExpression(),
-           b.identifier('$ctx'),
-           self.contextProperty('childFrame')]
-        )
-      )
-    ),
+        b.switchStatement(self.contextProperty('next'), cases),
 
-    // clean up the function
-    self.assign(self.getProperty(funcName, '$ctx'), b.identifier('undefined'))
+        b.ifStatement(
+          self.vmProperty('stepping'),
+          b.breakStatement()
+        )
+      ])
+    )
   ];
 };
 
@@ -1063,6 +997,7 @@ Ep.explodeStatement = function(path, labelId) {
     self.emitAssign(self.vmProperty('stepping'),
                     b.literal(true),
                     path.node.loc);
+    self.emitAssign(self.contextProperty('staticBreakpoint'), b.literal(true));
     self.emitAssign(self.contextProperty('next'), after);
     self.emit(b.breakStatement(), true);
     self.mark(after);
@@ -1159,8 +1094,8 @@ Ep.explodeExpression = function(path, ignoreResult) {
     n.Expression.assert(expr);
     if (ignoreResult) {
       var after = loc();
-      self.emit(expr);
-      self.emitAssign(self.contextProperty("next"), after, expr.loc);
+      self.emit(expr, expr.loc);
+      self.emitAssign(self.contextProperty("next"), after);
       self.emit(b.breakStatement(), true);
       self.mark(after);
     } else {
@@ -1253,6 +1188,8 @@ Ep.explodeExpression = function(path, ignoreResult) {
     var args = path.get("arguments").map(function(argPath) {
       return explodeViaTempVar(null, argPath);
     });
+    var callee;
+    var res = self.makeTempId();
 
     self.emit(
       withLoc(self.declareVar(
@@ -1261,22 +1198,21 @@ Ep.explodeExpression = function(path, ignoreResult) {
       ), path.node.loc)
     );
 
-    self.emit(
-      b.ifStatement(
-        newCallee,
-        self.assign(curContext, curContextTmp)
-      ),
-      true
-    );
-
     self.emit(b.callExpression(
       self.getProperty(curContextTmp, 'softReset'),
       []
     ), true);
 
-    var res = self.makeTempId();
+    if(n.FunctionExpression.check(newCallee)) {
+      callee = self.makeTempId();
+      self.emitAssign(callee, newCallee);
+    }
+    else {
+      callee = newCallee;
+    }
 
-    self.emit(self.declareVar(res.name, b.callExpression(newCallee, args)),
+    self.emitAssign(self.getProperty(callee, '$ctx'), curContextTmp);
+    self.emit(self.declareVar(res.name, b.callExpression(callee, args)),
               true);
     self.emitAssign(self.contextProperty("next"), after);
 
@@ -1479,7 +1415,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
   }
 };
 
-},{"./leap":4,"./meta":5,"./util":6,"assert":63,"ast-types":19}],3:[function(require,module,exports){
+},{"./leap":4,"./meta":5,"./util":6,"assert":65,"ast-types":19}],3:[function(require,module,exports){
 /**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -1514,9 +1450,9 @@ exports.hoist = function(fun) {
       vars[dec.id.name] = dec.id;
 
       if (dec.init) {
-        exprs.push(withLoc(b.assignmentExpression(
-          "=", dec.id, dec.init
-        ), dec.loc));
+        var assn = b.assignmentExpression('=', dec.id, dec.init);
+
+        exprs.push(withLoc(assn, dec.loc));
       } else if (includeIdentifiers) {
         exprs.push(dec.id);
       }
@@ -1572,13 +1508,20 @@ exports.hoist = function(fun) {
       funcExpr.loc = node.loc;
 
       var assignment = withLoc(b.expressionStatement(
-        withLoc(b.assignmentExpression("=", node.id, funcExpr), node.loc)
+        withLoc(b.assignmentExpression(
+          "=",
+          node.id,
+          funcExpr
+        ), node.loc)
       ), node.loc);
 
       if (n.BlockStatement.check(this.parent.node)) {
         // unshift because later it will be added in reverse, so this
         // will keep the original order
-        funDeclsToRaise.unshift(assignment);
+        funDeclsToRaise.unshift({
+          block: this.parent.node,
+          assignment: assignment
+        });
 
         // Remove the function declaration for now, but reinsert the assignment
         // form later, at the top of the enclosing BlockStatement.
@@ -1597,21 +1540,29 @@ exports.hoist = function(fun) {
     }
   });
 
+  funDeclsToRaise.forEach(function(entry) {
+    entry.block.body.unshift(entry.assignment);
+  });
+
+  var declarations = [];
   var paramNames = {};
+
   fun.params.forEach(function(param) {
     if (n.Identifier.check(param)) {
       paramNames[param.name] = param;
-    } else {
+    }
+    else {
       // Variables declared by destructuring parameter patterns will be
       // harmlessly re-declared.
     }
   });
 
-  var declarations = [];
-
   Object.keys(vars).forEach(function(name) {
-    if (!hasOwn.call(paramNames, name)) {
-      declarations.push(b.variableDeclarator(vars[name], null));
+    if(!hasOwn.call(paramNames, name)) {
+      var id = vars[name];
+      declarations.push(b.variableDeclarator(
+        id, id.boxed ? b.arrayExpression([b.identifier('undefined')]) : null
+      ));
     }
   });
 
@@ -1619,13 +1570,10 @@ exports.hoist = function(fun) {
     return null; // Be sure to handle this case!
   }
 
-  return {
-    vars: b.variableDeclaration("var", declarations),
-    funs: funDeclsToRaise
-  };
+  return b.variableDeclaration("var", declarations);
 };
 
-},{"./util":6,"assert":63,"ast-types":19}],4:[function(require,module,exports){
+},{"./util":6,"assert":65,"ast-types":19}],4:[function(require,module,exports){
 /**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -1894,7 +1842,7 @@ LMp.emitReturn = function(argPath, srcLoc) {
   this.emitter.jump(loc);
 };
 
-},{"./emit":2,"assert":63,"ast-types":19,"util":68}],5:[function(require,module,exports){
+},{"./emit":2,"assert":65,"ast-types":19,"util":70}],5:[function(require,module,exports){
 /**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -1998,7 +1946,7 @@ for (var type in leapTypes) {
 exports.hasSideEffects = makePredicate("hasSideEffects", sideEffectTypes);
 exports.containsLeap = makePredicate("containsLeap", leapTypes);
 
-},{"assert":63,"ast-types":19,"private":39}],6:[function(require,module,exports){
+},{"assert":65,"ast-types":19,"private":41}],6:[function(require,module,exports){
 /**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -2080,40 +2028,74 @@ var b = types.builders;
 var hoist = require("./hoist").hoist;
 var Emitter = require("./emit").Emitter;
 var DebugInfo = require("./debug").DebugInfo;
+var escope = require('escope');
 
 exports.transform = function(ast, opts) {
   n.Program.assert(ast);
-
   var debugInfo = new DebugInfo();
   var nodes = ast.body;
+  var isFunction = nodes.length === 1 && n.Function.check(nodes[0]);
+  var originalId = null;
 
-  if(opts.asRoot) {
+  var s = escope.analyze(ast);
+  s.scopes.forEach(function(scope) {
+    if(scope.type != 'global') {
+      scope.references.forEach(function(r) {
+        if(r.resolved &&
+           r.resolved.scope !== r.from &&
+           r.resolved.defs[0].type !== 'FunctionName') {
+          r.identifier.boxed = true;
+          r.resolved.defs.forEach(function(def) {
+            def.name.boxed = true;
+          });
+        }
+      });
+    }
+  });
+
+  if(!isFunction) {
     nodes = b.functionExpression(
-      opts.asRoot ? b.identifier('$__root') : null,
+      b.identifier('$__global'),
       [],
-      b.blockStatement(ast.body)
+      b.blockStatement(nodes)
     );
+  }
+  else {
+    originalId = nodes[0].id;
   }
 
   var rootFn = types.traverse(
     nodes,
     function(node) {
-      return visitNode(node, [], debugInfo, opts.exprAtPoint);
+      return visitNode.call(this, node, [], debugInfo);
     }
   );
 
-  if(opts.asRoot) {
+  if(!isFunction) {
+    rootFn = rootFn.body.body;
+  }
+  else {
+    rootFn = rootFn[0];
     rootFn = [b.expressionStatement(
-      b.sequenceExpression([rootFn])
+      b.assignmentExpression(
+        '=',
+        originalId,
+        b.functionExpression(
+          rootFn.id,
+          rootFn.params,
+          rootFn.body,
+          rootFn.generator,
+          rootFn.expression
+        )
+      )
     )];
   }
 
-  var body = opts.includeDebug ? [debugInfo.getDebugAST()] : [];
-  body = body.concat(rootFn);
-  ast.body = body;
+  ast.body = rootFn;
 
   return {
     ast: ast,
+    debugAST: opts.includeDebug ? [debugInfo.getDebugAST()] : [],
     debugInfo: debugInfo.getDebugInfo()
   };
 };
@@ -2123,8 +2105,17 @@ function newFunctionName() {
   return b.identifier('$anon' + id++);
 }
 
-function visitNode(node, scope, debugInfo, exprAtPoint) {
-  if (!n.Function.check(node)) {
+function visitNode(node, scope, debugInfo) {
+  if(n.Identifier.check(node) && 
+     (!n.VariableDeclarator.check(this.parent.node) ||
+      this.parent.node.id !== node) &&
+     node.boxed) {
+
+    this.replace(b.memberExpression(node, b.literal(0), true));
+    return;
+  }
+  
+  if(!n.Function.check(node)) {
     // Note that because we are not returning false here the traversal
     // will continue into the subtree rooted at this node, as desired.
     return;
@@ -2142,84 +2133,194 @@ function visitNode(node, scope, debugInfo, exprAtPoint) {
   }
 
   // TODO: Ensure these identifiers are named uniquely.
+  node.id = (node.id && b.identifier('$' + node.id.name)) || newFunctionName();
+  var isGlobal = node.id.name === '$$__global';
   var nameId = node.id;
-  node.id = node.id || newFunctionName();
-  var contextId = b.identifier("$ctx");
-  var hoisted = hoist(node);
-  var vars = hoisted.vars;
-  var funs = hoisted.funs;
-  var argNames = node.params.map(function(v) { return v.name; });
-  var varNames = !vars ? argNames : argNames.concat(
+  var funcName = node.id.name;
+  var contextId = b.identifier('$ctx');
+  var vars = hoist(node);
+  var localScope = !vars ? node.params : node.params.concat(
     vars.declarations.map(function(v) {
-      return v.id.name;
+      return v.id;
     })
   );
 
-  var emitter = new Emitter(contextId, debugId, debugInfo);
+  // Traverse and compile child functions first
+  node.body = types.traverse(node.body, function(child) {
+    return visitNode.call(this, 
+                          child, 
+                          scope.concat(localScope),
+                          debugInfo);
+  });
+
+  // Now compile me
+  var em = new Emitter(contextId, debugId, debugInfo);
   var path = new types.NodePath(node);
 
-  emitter.explode(path.get("body"));
+  em.explode(path.get("body"));
 
-  var machine = emitter.getMachine(node.id.name, varNames, scope);
-  var inner = vars ? [vars] : [];
-  
-  inner.push.apply(inner, [
+  var machine = em.getMachine(node.id.name, localScope);
+  var finalBody = machine.ast;
+  // types.traverse(machine.ast, function(node) {
+  //   return visitNode.call(this,
+  //                         node,
+  //                         localScope.concat(scope),
+  //                         debugInfo);
+  // });
+
+  // construct the thing
+
+  function addSnapshot(arr) {
+    arr.push.apply(arr, [
+      // if it falls out of the loops, that means we've paused so create
+      // a frame
+      b.expressionStatement(
+        b.assignmentExpression(
+          '=',
+          em.contextProperty('frame'),
+          b.newExpression(
+            b.identifier('$Frame'),
+            [b.literal(debugId),
+             b.literal(funcName.slice(1)),
+             b.identifier(funcName),
+             b.objectExpression(
+               localScope.map(function(id) {
+                 return b.property(
+                   'init',
+                   b.literal(id.name),
+                   id
+                 );
+               })
+             ),
+             b.arrayExpression(localScope.concat(scope).map(function(id) {
+               return b.objectExpression([
+                 b.property('init', b.literal('name'), b.literal(id.name)),
+                 b.property('init', b.literal('boxed'), b.literal(!!id.boxed))
+               ]);
+             })),
+             b.thisExpression(),
+             contextId,
+             em.contextProperty('childFrame')]
+          )
+        )
+      ),
+
+      // clean up the function
+      em.assign(em.getProperty(funcName, '$ctx'), b.identifier('undefined'))
+    ]);
+  }
+
+  var inner = [];
+
+  if(!isGlobal) {
+    node.params.forEach(function(arg) {
+      if(arg.boxed) {
+        inner.push(b.expressionStatement(
+          b.assignmentExpression(
+            '=',
+            arg, 
+            b.arrayExpression([arg])
+          )
+        ));
+      }
+    });
+
+    if(vars) {
+      inner = inner.concat(vars);
+    }
+  }
+
+  inner.push(
     b.variableDeclaration('var', [
       b.variableDeclarator(
         b.identifier(machine.contextId),
         b.memberExpression(node.id, b.identifier('$ctx'), false)
       )
-    ]),
-    b.ifStatement(
-      b.binaryExpression('===',
-                         b.identifier('$ctx'),
-                         b.identifier('undefined')), // is "identifier" right?
-      b.returnStatement(
-        b.callExpression(
-          b.memberExpression(b.identifier('VM'),
-                             b.identifier('runProgram'),
+    ])
+  );
+
+  if(!isGlobal) {
+    inner.push.apply(inner, [
+      b.ifStatement(
+        b.binaryExpression('===',
+                           b.identifier('$ctx'),
+                           b.identifier('undefined')), // is "identifier" right?
+        b.returnStatement(
+          b.callExpression(
+            b.memberExpression(b.identifier('VM'),
+                               b.identifier('execute'),
+                               false),
+            [node.id, b.literal(null), b.thisExpression(), b.identifier('arguments')]
+          )
+        )
+      ),
+      b.expressionStatement(
+        b.assignmentExpression(
+          '=',
+          b.memberExpression(b.identifier('$ctx'), b.identifier('isCompiled'),
                              false),
-          [node.id, b.identifier('arguments')]
+          b.literal(true)
         )
       )
-    ),
-    b.expressionStatement(
-      b.assignmentExpression(
-        '=',
-        b.memberExpression(b.identifier('$ctx'), b.identifier('isCompiled'),
-                           false),
-        b.literal(true)
-      )
+    ]);
+  }
+
+  inner = inner.concat([
+    b.tryStatement(
+      b.blockStatement([getRestoration(em, isGlobal, localScope)]
+                       .concat(finalBody)),
+      b.catchClause(b.identifier('e'), null, b.blockStatement([
+        b.expressionStatement(
+          b.assignmentExpression(
+            '=',
+            b.memberExpression(b.identifier('VM'), b.identifier('error'), false),
+            b.identifier('e')
+          )
+        )
+      ]))
     )
   ]);
+  addSnapshot(inner);
 
-  addRestoration(emitter, varNames, inner);
-  inner.push.apply(inner, funs);
+  if(isGlobal) {
+    node.body = b.blockStatement([
+      vars ? vars : b.expressionStatement(b.literal(null)),
+      b.functionDeclaration(
+          nameId, [],
+          b.blockStatement(inner)
+      ),
+      b.returnStatement(nameId)
+    ]);
+  }
+  else {
+    node.body = b.blockStatement(inner);
+  }
 
-  node.body = b.blockStatement(inner.concat(
-    types.traverse(machine.ast, function(node) {
-      return visitNode(node,
-                       varNames.concat(scope),
-                       debugInfo,
-                       exprAtPoint);
-    })
-  ));
   return false;
 }
 
-function addRestoration(self, varNames, arr) {
+function getRestoration(self, isGlobal, localScope) {
   // restoring a frame
-  var restoration = varNames.map(function(v) {
-    return b.expressionStatement(
-      b.assignmentExpression(
-        '=',
-        b.identifier(v),
-        self.getProperty(
-          self.getProperty(self.contextProperty('frame'), 'scope'), v
+  var restoration = [];
+
+  if(!isGlobal) {
+    restoration = localScope.map(function(id) {
+      return b.expressionStatement(
+        b.assignmentExpression(
+          '=',
+          (id.boxed ?
+           b.memberExpression(id, b.literal(0), true) :
+           b.identifier(id.name)),
+          self.getProperty(
+            self.getProperty(self.contextProperty('frame'), 'state'),
+            id
+          )
         )
-      )
-    );
-  }).concat([
+      );
+    });
+  }
+
+  restoration = restoration.concat([
     self.declareVar('$child', self.getProperty(self.contextProperty('frame'), 'child')),
     b.ifStatement(
       b.identifier('$child'),
@@ -2256,66 +2357,25 @@ function addRestoration(self, varNames, arr) {
         )
       ]),
       b.blockStatement([
-        b.ifStatement(
-          self.contextProperty('staticBreakpoint'),
-          self.assign(
-            self.getProperty('$ctx', 'next'),
-            b.binaryExpression('+', self.getProperty('$ctx', 'next'), b.literal(3))
-          )
-        ),
         self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
         self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null))
       ])
     )
   ]);
 
-  arr.push.apply(arr, [
+  return b.ifStatement(
+    self.contextProperty('frame'),
+    b.blockStatement(restoration),
     b.ifStatement(
-      self.contextProperty('frame'),
-      b.blockStatement(restoration),
-      b.ifStatement(
-        // if we are stepping, stop executing so it is stopped at
-        // the first instruction of the new frame
-        self.vmProperty('stepping'),
-        b.throwStatement(b.literal(null))
-      )
+      // if we are stepping, stop executing so it is stopped at
+      // the first instruction of the new frame
+      self.vmProperty('stepping'),
+      b.throwStatement(b.literal(null))
     )
-  ]);
+  );
 }
 
-function renameIdentifier(func, id, newId) {
-  var didReplace = false;
-  var hasImplicit = false;
-
-  types.traverse(func, function(node) {
-    if (node === func) {
-      hasImplicit = !this.scope.lookup(id);
-    } else if (n.Function.check(node)) {
-      return false;
-    }
-
-    if ((n.Identifier.check(node) && node.name === id) ||
-        (n.ThisExpression.check(node) && id === 'this')) {
-      var isMemberProperty =
-        n.MemberExpression.check(this.parent.node) &&
-        this.name === "property" &&
-        !this.parent.node.computed;
-
-      if (!isMemberProperty) {
-        this.replace(newId);
-        didReplace = true;
-        return false;
-      }
-    }
-  });
-
-  // If the traversal replaced any arguments identifiers, and those
-  // identifiers were free variables, then we need to alias the outer
-  // function's arguments object to the variable named by newId.
-  return didReplace && hasImplicit;
-}
-
-},{"./debug":1,"./emit":2,"./hoist":3,"assert":63,"ast-types":19}],8:[function(require,module,exports){
+},{"./debug":1,"./emit":2,"./hoist":3,"assert":65,"ast-types":19,"escope":38}],8:[function(require,module,exports){
 var __dirname="/";/**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -2348,7 +2408,6 @@ function regenerator(source, options) {
     includeRuntime: false,
     supportBlockBinding: true
   });
-  options.asRoot = true;
 
   var runtime = options.includeRuntime ? fs.readFileSync(
     regenerator.runtime.dev, "utf-8"
@@ -2399,11 +2458,31 @@ function regenerator(source, options) {
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
   if (options.includeRuntime) {
+    recastAst.program.body = [b.variableDeclaration(
+      'var',
+      [b.variableDeclarator(
+        b.identifier('$__global'),
+        b.callExpression(
+          b.functionExpression(
+            null, [],
+            b.blockStatement(recastAst.program.body)
+          ),
+          []
+        )
+      )]
+    )];
+
     var body = recastAst.program.body;
     body.unshift.apply(body, runtimeBody);
 
-    appendix += 'var VM = new $Machine();' +
-      'VM.beginFunc($__root, new $DebugInfo(__debugInfo));';
+    appendix += 'var VM = new $Machine();\n' +
+      'VM.on("error", function(e) { throw e; });\n' +
+      'VM.run($__global, __debugInfo);';
+  }
+
+  if(options.includeDebug) {
+    var body = recastAst.program.body;
+    body.unshift.apply(body, transformed.debugAST);
   }
 
   return {
@@ -2423,7 +2502,7 @@ regenerator.runtime = {
 // To transform a string of ES6 code, call require("regenerator")(source);
 module.exports = regenerator;
 
-},{"./lib/util":6,"./lib/visit":7,"assert":63,"ast-types":19,"defs":23,"esprima":38,"fs":62,"path":66,"recast":50}],9:[function(require,module,exports){
+},{"./lib/util":6,"./lib/visit":7,"assert":65,"ast-types":19,"defs":23,"esprima":39,"fs":64,"path":68,"recast":52}],9:[function(require,module,exports){
 var types = require("../lib/types");
 var Type = types.Type;
 var def = Type.def;
@@ -3498,7 +3577,7 @@ function firstInStatement(path) {
 
 module.exports = NodePath;
 
-},{"./scope":15,"./types":18,"assert":63,"ast-path":21,"util":68}],15:[function(require,module,exports){
+},{"./scope":15,"./types":18,"assert":65,"ast-path":21,"util":70}],15:[function(require,module,exports){
 var assert = require("assert");
 var types = require("./types");
 var Type = types.Type;
@@ -3696,7 +3775,7 @@ Sp.getGlobalScope = function() {
 
 module.exports = Scope;
 
-},{"./node-path":14,"./types":18,"assert":63}],16:[function(require,module,exports){
+},{"./node-path":14,"./types":18,"assert":65}],16:[function(require,module,exports){
 var types = require("../lib/types");
 var Type = types.Type;
 var builtin = types.builtInTypes;
@@ -3839,7 +3918,7 @@ traverseWithFullPathInfo.fast = traverseWithNoPathInfo;
 
 module.exports = traverseWithFullPathInfo;
 
-},{"./node-path":14,"./types":18,"assert":63}],18:[function(require,module,exports){
+},{"./node-path":14,"./types":18,"assert":65}],18:[function(require,module,exports){
 var assert = require("assert");
 var Ap = Array.prototype;
 var slice = Ap.slice;
@@ -4509,7 +4588,7 @@ Object.defineProperty(exports, "finalize", {
     }
 });
 
-},{"assert":63}],19:[function(require,module,exports){
+},{"assert":65}],19:[function(require,module,exports){
 var types = require("./lib/types");
 
 // This core module of AST types captures ES5 as it is parsed today by
@@ -4708,7 +4787,7 @@ Pp.replace = function(replacement) {
 
 exports.Path = Path;
 
-},{"assert":63,"private":22}],21:[function(require,module,exports){
+},{"assert":65,"private":22}],21:[function(require,module,exports){
 exports.Path = require("./lib/path").Path;
 
 },{"./lib/path":20}],22:[function(require,module,exports){
@@ -5475,7 +5554,7 @@ function run(src, config) {
 
 module.exports = run;
 
-},{"./error":24,"./jshint_globals/vars.js":25,"./options":26,"./scope":27,"./stats":28,"alter":29,"assert":63,"ast-traverse":31,"breakable":32,"simple-fmt":34,"simple-is":35,"stringmap":36,"stringset":37}],24:[function(require,module,exports){
+},{"./error":24,"./jshint_globals/vars.js":25,"./options":26,"./scope":27,"./stats":28,"alter":29,"assert":65,"ast-traverse":31,"breakable":32,"simple-fmt":34,"simple-is":35,"stringmap":36,"stringset":37}],24:[function(require,module,exports){
 "use strict";
 
 var fmt = require("simple-fmt");
@@ -5498,7 +5577,7 @@ error.reset();
 
 module.exports = error;
 
-},{"assert":63,"simple-fmt":34}],25:[function(require,module,exports){
+},{"assert":65,"simple-fmt":34}],25:[function(require,module,exports){
 // jshint -W001
 
 "use strict";
@@ -6130,7 +6209,7 @@ Scope.prototype.traverse = function(options) {
 
 module.exports = Scope;
 
-},{"./error":24,"./options":26,"assert":63,"simple-fmt":34,"simple-is":35,"stringmap":36,"stringset":37}],28:[function(require,module,exports){
+},{"./error":24,"./options":26,"assert":65,"simple-fmt":34,"simple-is":35,"stringmap":36,"stringset":37}],28:[function(require,module,exports){
 var fmt = require("simple-fmt");
 var is = require("simple-is");
 var assert = require("assert");
@@ -6182,7 +6261,7 @@ Stats.prototype.toString = function() {
 
 module.exports = Stats;
 
-},{"assert":63,"simple-fmt":34,"simple-is":35}],29:[function(require,module,exports){
+},{"assert":65,"simple-fmt":34,"simple-is":35}],29:[function(require,module,exports){
 // alter.js
 // MIT licensed, see LICENSE file
 // Copyright (c) 2013 Olov Lassus <olov.lassus@gmail.com>
@@ -6229,7 +6308,7 @@ if (typeof module !== "undefined" && typeof module.exports !== "undefined") {
     module.exports = alter;
 }
 
-},{"assert":63,"stable":30}],30:[function(require,module,exports){
+},{"assert":65,"stable":30}],30:[function(require,module,exports){
 //! stable.js 0.1.4, https://github.com/Two-Screen/stable
 //! © 2012 Stéphan Kochen, Angry Bytes. MIT licensed.
 
@@ -10862,6 +10941,1125 @@ if (typeof module !== "undefined" && typeof module.exports !== "undefined") {
 }
 
 },{}],38:[function(require,module,exports){
+/*
+  Copyright (C) 2012-2013 Yusuke Suzuki <utatane.tea@gmail.com>
+  Copyright (C) 2013 Alex Seville <hi@alexanderseville.com>
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+  DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+  THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+/**
+ * Escope (<a href="http://github.com/Constellation/escope">escope</a>) is an <a
+ * href="http://www.ecma-international.org/publications/standards/Ecma-262.htm">ECMAScript</a>
+ * scope analyzer extracted from the <a
+ * href="http://github.com/Constellation/esmangle">esmangle project</a/>.
+ * <p>
+ * <em>escope</em> finds lexical scopes in a source program, i.e. areas of that
+ * program where different occurrences of the same identifier refer to the same
+ * variable. With each scope the contained variables are collected, and each
+ * identifier reference in code is linked to its corresponding variable (if
+ * possible).
+ * <p>
+ * <em>escope</em> works on a syntax tree of the parsed source code which has
+ * to adhere to the <a
+ * href="https://developer.mozilla.org/en-US/docs/SpiderMonkey/Parser_API">
+ * Mozilla Parser API</a>. E.g. <a href="http://esprima.org">esprima</a> is a parser
+ * that produces such syntax trees.
+ * <p>
+ * The main interface is the {@link analyze} function.
+ * @module
+ */
+
+/*jslint bitwise:true */
+/*global exports:true, define:true, require:true*/
+(function (factory, global) {
+    'use strict';
+
+    function namespace(str, obj) {
+        var i, iz, names, name;
+        names = str.split('.');
+        for (i = 0, iz = names.length; i < iz; ++i) {
+            name = names[i];
+            if (obj.hasOwnProperty(name)) {
+                obj = obj[name];
+            } else {
+                obj = (obj[name] = {});
+            }
+        }
+        return obj;
+    }
+
+    // Universal Module Definition (UMD) to support AMD, CommonJS/Node.js,
+    // and plain browser loading,
+    if (typeof define === 'function' && define.amd) {
+        define('escope', ['exports', 'estraverse'], function (exports, estraverse) {
+            factory(exports, global, estraverse);
+        });
+    } else if (typeof exports !== 'undefined') {
+        factory(exports, global, require('estraverse'));
+    } else {
+        factory(namespace('escope', global), global, global.estraverse);
+    }
+}(function (exports, global, estraverse) {
+    'use strict';
+
+    var Syntax,
+        Map,
+        currentScope,
+        globalScope,
+        scopes,
+        options;
+
+    Syntax = estraverse.Syntax;
+
+    if (typeof global.Map !== 'undefined') {
+        // ES6 Map
+        Map = global.Map;
+    } else {
+        Map = function Map() {
+            this.__data = {};
+        };
+
+        Map.prototype.get = function MapGet(key) {
+            key = '$' + key;
+            if (this.__data.hasOwnProperty(key)) {
+                return this.__data[key];
+            }
+            return undefined;
+        };
+
+        Map.prototype.has = function MapHas(key) {
+            key = '$' + key;
+            return this.__data.hasOwnProperty(key);
+        };
+
+        Map.prototype.set = function MapSet(key, val) {
+            key = '$' + key;
+            this.__data[key] = val;
+        };
+
+        Map.prototype['delete'] = function MapDelete(key) {
+            key = '$' + key;
+            return delete this.__data[key];
+        };
+    }
+
+    function assert(cond, text) {
+        if (!cond) {
+            throw new Error(text);
+        }
+    }
+
+    function defaultOptions() {
+        return {
+            optimistic: false,
+            directive: false
+        };
+    }
+
+    function updateDeeply(target, override) {
+        var key, val;
+
+        function isHashObject(target) {
+            return typeof target === 'object' && target instanceof Object && !(target instanceof RegExp);
+        }
+
+        for (key in override) {
+            if (override.hasOwnProperty(key)) {
+                val = override[key];
+                if (isHashObject(val)) {
+                    if (isHashObject(target[key])) {
+                        updateDeeply(target[key], val);
+                    } else {
+                        target[key] = updateDeeply({}, val);
+                    }
+                } else {
+                    target[key] = val;
+                }
+            }
+        }
+        return target;
+    }
+
+    /**
+     * A Reference represents a single occurrence of an identifier in code.
+     * @class Reference
+     */
+    function Reference(ident, scope, flag, writeExpr, maybeImplicitGlobal) {
+        /** 
+         * Identifier syntax node.
+         * @member {esprima#Identifier} Reference#identifier 
+         */
+        this.identifier = ident;
+        /** 
+         * Reference to the enclosing Scope.
+         * @member {Scope} Reference#from 
+         */
+        this.from = scope;
+        /**
+         * Whether the reference comes from a dynamic scope (such as 'eval',
+         * 'with', etc.), and may be trapped by dynamic scopes.
+         * @member {boolean} Reference#tainted
+         */
+        this.tainted = false;
+        /** 
+         * The variable this reference is resolved with.
+         * @member {Variable} Reference#resolved 
+         */
+        this.resolved = null;
+        /** 
+         * The read-write mode of the reference. (Value is one of {@link
+         * Reference.READ}, {@link Reference.RW}, {@link Reference.WRITE}).
+         * @member {number} Reference#flag 
+         * @private
+         */
+        this.flag = flag;
+        if (this.isWrite()) {
+            /** 
+             * If reference is writeable, this is the tree being written to it.
+             * @member {esprima#Node} Reference#writeExpr 
+             */
+            this.writeExpr = writeExpr;
+        }
+        /** 
+         * Whether the Reference might refer to a global variable.
+         * @member {boolean} Reference#__maybeImplicitGlobal 
+         * @private
+         */
+        this.__maybeImplicitGlobal = maybeImplicitGlobal;
+    }
+
+    /** 
+     * @constant Reference.READ 
+     * @private
+     */
+    Reference.READ = 0x1;
+    /** 
+     * @constant Reference.WRITE 
+     * @private
+     */
+    Reference.WRITE = 0x2;
+    /** 
+     * @constant Reference.RW 
+     * @private
+     */
+    Reference.RW = 0x3;
+
+    /**
+     * Whether the reference is static.
+     * @method Reference#isStatic
+     * @return {boolean}
+     */
+    Reference.prototype.isStatic = function isStatic() {
+        return !this.tainted && this.resolved && this.resolved.scope.isStatic();
+    };
+
+    /**
+     * Whether the reference is writeable.
+     * @method Reference#isWrite
+     * @return {boolean}
+     */
+    Reference.prototype.isWrite = function isWrite() {
+        return this.flag & Reference.WRITE;
+    };
+
+    /**
+     * Whether the reference is readable.
+     * @method Reference#isRead
+     * @return {boolean}
+     */
+    Reference.prototype.isRead = function isRead() {
+        return this.flag & Reference.READ;
+    };
+
+    /**
+     * Whether the reference is read-only.
+     * @method Reference#isReadOnly
+     * @return {boolean}
+     */
+    Reference.prototype.isReadOnly = function isReadOnly() {
+        return this.flag === Reference.READ;
+    };
+
+    /**
+     * Whether the reference is write-only.
+     * @method Reference#isWriteOnly
+     * @return {boolean}
+     */
+    Reference.prototype.isWriteOnly = function isWriteOnly() {
+        return this.flag === Reference.WRITE;
+    };
+
+    /**
+     * Whether the reference is read-write.
+     * @method Reference#isReadWrite
+     * @return {boolean}
+     */
+    Reference.prototype.isReadWrite = function isReadWrite() {
+        return this.flag === Reference.RW;
+    };
+
+    /**
+     * A Variable represents a locally scoped identifier. These include arguments to
+     * functions.
+     * @class Variable
+     */
+    function Variable(name, scope) {
+        /**  
+         * The variable name, as given in the source code.
+         * @member {String} Variable#name 
+         */
+        this.name = name;
+        /**
+         * List of defining occurrences of this variable (like in 'var ...'
+         * statements or as parameter), as AST nodes.
+         * @member {esprima.Identifier[]} Variable#identifiers
+         */
+        this.identifiers = [];
+        /**
+         * List of {@link Reference|references} of this variable (excluding parameter entries)
+         * in its defining scope and all nested scopes. For defining
+         * occurrences only see {@link Variable#defs}.
+         * @member {Reference[]} Variable#references
+         */
+        this.references = [];
+
+        /**
+         * List of defining occurrences of this variable (like in 'var ...'
+         * statements or as parameter), as custom objects.
+         * @typedef {Object} DefEntry
+         * @property {String} DefEntry.type - the type of the occurrence (e.g.
+         *      "Parameter", "Variable", ...)
+         * @property {esprima.Identifier} DefEntry.name - the identifier AST node of the occurrence
+         * @property {esprima.Node} DefEntry.node - the enclosing node of the
+         *      identifier
+         * @property {esprima.Node} [DefEntry.parent] - the enclosing statement
+         *      node of the identifier
+         * @member {DefEntry[]} Variable#defs
+         */
+        this.defs = [];
+
+        this.tainted = false;
+        /**
+         * Whether this is a stack variable.
+         * @member {boolean} Variable#stack
+         */
+        this.stack = true;
+        /** 
+         * Reference to the enclosing Scope.
+         * @member {Scope} Variable#scope 
+         */
+        this.scope = scope;
+    }
+
+    Variable.CatchClause = 'CatchClause';
+    Variable.Parameter = 'Parameter';
+    Variable.FunctionName = 'FunctionName';
+    Variable.Variable = 'Variable';
+    Variable.ImplicitGlobalVariable = 'ImplicitGlobalVariable';
+
+    function isStrictScope(scope, block) {
+        var body, i, iz, stmt, expr;
+
+        // When upper scope is exists and strict, inner scope is also strict.
+        if (scope.upper && scope.upper.isStrict) {
+            return true;
+        }
+
+        if (scope.type === 'function') {
+            body = block.body;
+        } else if (scope.type === 'global') {
+            body = block;
+        } else {
+            return false;
+        }
+
+        if (options.directive) {
+            for (i = 0, iz = body.body.length; i < iz; ++i) {
+                stmt = body.body[i];
+                if (stmt.type !== 'DirectiveStatement') {
+                    break;
+                }
+                if (stmt.raw === '"use strict"' || stmt.raw === '\'use strict\'') {
+                    return true;
+                }
+            }
+        } else {
+            for (i = 0, iz = body.body.length; i < iz; ++i) {
+                stmt = body.body[i];
+                if (stmt.type !== Syntax.ExpressionStatement) {
+                    break;
+                }
+                expr = stmt.expression;
+                if (expr.type !== Syntax.Literal || typeof expr.value !== 'string') {
+                    break;
+                }
+                if (expr.raw != null) {
+                    if (expr.raw === '"use strict"' || expr.raw === '\'use strict\'') {
+                        return true;
+                    }
+                } else {
+                    if (expr.value === 'use strict') {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @class Scope
+     */
+    function Scope(block, opt) {
+        var variable, body;
+
+        /**
+         * One of 'catch', 'with', 'function' or 'global'.
+         * @member {String} Scope#type
+         */
+        this.type =
+            (block.type === Syntax.CatchClause) ? 'catch' :
+            (block.type === Syntax.WithStatement) ? 'with' :
+            (block.type === Syntax.Program) ? 'global' : 'function';
+         /**
+         * The scoped {@link Variable}s of this scope, as <code>{ Variable.name
+         * : Variable }</code>.
+         * @member {Map} Scope#set
+         */
+        this.set = new Map();
+        /**
+         * The tainted variables of this scope, as <code>{ Variable.name :
+         * boolean }</code>.
+         * @member {Map} Scope#taints */
+        this.taints = new Map();
+        /**
+         * Generally, through the lexical scoping of JS you can always know
+         * which variable an identifier in the source code refers to. There are
+         * a few exceptions to this rule. With 'global' and 'with' scopes you
+         * can only decide at runtime which variable a reference refers to.
+         * Moreover, if 'eval()' is used in a scope, it might introduce new
+         * bindings in this or its prarent scopes.
+         * All those scopes are considered 'dynamic'.
+         * @member {boolean} Scope#dynamic
+         */
+        this.dynamic = this.type === 'global' || this.type === 'with';
+        /**
+         * A reference to the scope-defining syntax node.
+         * @member {esprima.Node} Scope#block
+         */
+        this.block = block;
+         /**
+         * The {@link Reference|references} that are not resolved with this scope.
+         * @member {Reference[]} Scope#through
+         */
+        this.through = [];
+         /**
+         * The scoped {@link Variable}s of this scope. In the case of a
+         * 'function' scope this includes the automatic argument <em>arguments</em> as
+         * its first element, as well as all further formal arguments.
+         * @member {Variable[]} Scope#variables
+         */
+        this.variables = [];
+         /**
+         * Any variable {@link Reference|reference} found in this scope. This
+         * includes occurrences of local variables as well as variables from
+         * parent scopes (including the global scope). For local variables
+         * this also includes defining occurrences (like in a 'var' statement).
+         * In a 'function' scope this does not include the occurrences of the
+         * formal parameter in the parameter list.
+         * @member {Reference[]} Scope#references
+         */
+        this.references = [];
+         /**
+         * List of {@link Reference}s that are left to be resolved (i.e. which
+         * need to be linked to the variable they refer to). Used internally to
+         * resolve bindings during scope analysis. On a finalized scope
+         * analysis, all sopes have <em>left</em> value <strong>null</strong>.
+         * @member {Reference[]} Scope#left
+         */
+        this.left = [];
+         /**
+         * For 'global' and 'function' scopes, this is a self-reference. For
+         * other scope types this is the <em>variableScope</em> value of the
+         * parent scope.
+         * @member {Scope} Scope#variableScope
+         */
+        this.variableScope =
+            (this.type === 'global' || this.type === 'function') ? this : currentScope.variableScope;
+         /**
+         * Whether this scope is created by a FunctionExpression.
+         * @member {boolean} Scope#functionExpressionScope
+         */
+        this.functionExpressionScope = false;
+         /**
+         * Whether this is a scope that contains an 'eval()' invocation.
+         * @member {boolean} Scope#directCallToEvalScope
+         */
+        this.directCallToEvalScope = false;
+         /**
+         * @member {boolean} Scope#thisFound
+         */
+        this.thisFound = false;
+        body = this.type === 'function' ? block.body : block;
+        if (opt.naming) {
+            this.__define(block.id, {
+                type: Variable.FunctionName,
+                name: block.id,
+                node: block
+            });
+            this.functionExpressionScope = true;
+        } else {
+            if (this.type === 'function') {
+                variable = new Variable('arguments', this);
+                this.taints.set('arguments', true);
+                this.set.set('arguments', variable);
+                this.variables.push(variable);
+            }
+
+            if (block.type === Syntax.FunctionExpression && block.id) {
+                new Scope(block, { naming: true });
+            }
+        }
+
+         /**
+         * Reference to the parent {@link Scope|scope}.
+         * @member {Scope} Scope#upper
+         */
+        this.upper = currentScope;
+         /**
+         * Whether 'use strict' is in effect in this scope.
+         * @member {boolean} Scope#isStrict
+         */
+        this.isStrict = isStrictScope(this, block);
+
+         /**
+         * List of nested {@link Scope}s.
+         * @member {Scope[]} Scope#childScopes
+         */
+        this.childScopes = [];
+        if (currentScope) {
+            currentScope.childScopes.push(this);
+        }
+
+
+        // RAII
+        currentScope = this;
+        if (this.type === 'global') {
+            globalScope = this;
+            globalScope.implicit = {
+                set: new Map(),
+                variables: []
+            };
+        }
+        scopes.push(this);
+    }
+
+    Scope.prototype.__close = function __close() {
+        var i, iz, ref, current, node, implicit;
+
+        // Because if this is global environment, upper is null
+        if (!this.dynamic || options.optimistic) {
+            // static resolve
+            for (i = 0, iz = this.left.length; i < iz; ++i) {
+                ref = this.left[i];
+                if (!this.__resolve(ref)) {
+                    this.__delegateToUpperScope(ref);
+                }
+            }
+        } else {
+            // this is "global" / "with" / "function with eval" environment
+            if (this.type === 'with') {
+                for (i = 0, iz = this.left.length; i < iz; ++i) {
+                    ref = this.left[i];
+                    ref.tainted = true;
+                    this.__delegateToUpperScope(ref);
+                }
+            } else {
+                for (i = 0, iz = this.left.length; i < iz; ++i) {
+                    // notify all names are through to global
+                    ref = this.left[i];
+                    current = this;
+                    do {
+                        current.through.push(ref);
+                        current = current.upper;
+                    } while (current);
+                }
+            }
+        }
+
+        if (this.type === 'global') {
+            implicit = [];
+            for (i = 0, iz = this.left.length; i < iz; ++i) {
+                ref = this.left[i];
+                if (ref.__maybeImplicitGlobal && !this.set.has(ref.identifier.name)) {
+                    implicit.push(ref.__maybeImplicitGlobal);
+                }
+            }
+
+            // create an implicit global variable from assignment expression
+            for (i = 0, iz = implicit.length; i < iz; ++i) {
+                node = implicit[i];
+                this.__defineImplicit(node.left, {
+                    type: Variable.ImplicitGlobalVariable,
+                    name: node.left,
+                    node: node
+                });
+            }
+        }
+
+        this.left = null;
+        currentScope = this.upper;
+    };
+
+    Scope.prototype.__resolve = function __resolve(ref) {
+        var variable, name;
+        name = ref.identifier.name;
+        if (this.set.has(name)) {
+            variable = this.set.get(name);
+            variable.references.push(ref);
+            variable.stack = variable.stack && ref.from.variableScope === this.variableScope;
+            if (ref.tainted) {
+                variable.tainted = true;
+                this.taints.set(variable.name, true);
+            }
+            ref.resolved = variable;
+            return true;
+        }
+        return false;
+    };
+
+    Scope.prototype.__delegateToUpperScope = function __delegateToUpperScope(ref) {
+        if (this.upper) {
+            this.upper.left.push(ref);
+        }
+        this.through.push(ref);
+    };
+
+    Scope.prototype.__defineImplicit = function __defineImplicit(node, info) {
+        var name, variable;
+        if (node && node.type === Syntax.Identifier) {
+            name = node.name;
+            if (!this.implicit.set.has(name)) {
+                variable = new Variable(name, this);
+                variable.identifiers.push(node);
+                variable.defs.push(info);
+                this.implicit.set.set(name, variable);
+                this.implicit.variables.push(variable);
+            } else {
+                variable = this.implicit.set.get(name);
+                variable.identifiers.push(node);
+                variable.defs.push(info);
+            }
+        }
+    };
+
+    Scope.prototype.__define = function __define(node, info) {
+        var name, variable;
+        if (node && node.type === Syntax.Identifier) {
+            name = node.name;
+            if (!this.set.has(name)) {
+                variable = new Variable(name, this);
+                variable.identifiers.push(node);
+                variable.defs.push(info);
+                this.set.set(name, variable);
+                this.variables.push(variable);
+            } else {
+                variable = this.set.get(name);
+                variable.identifiers.push(node);
+                variable.defs.push(info);
+            }
+        }
+    };
+
+    Scope.prototype.__referencing = function __referencing(node, assign, writeExpr, maybeImplicitGlobal) {
+        var ref;
+        // because Array element may be null
+        if (node && node.type === Syntax.Identifier) {
+            ref = new Reference(node, this, assign || Reference.READ, writeExpr, maybeImplicitGlobal);
+            this.references.push(ref);
+            this.left.push(ref);
+        }
+    };
+
+    Scope.prototype.__detectEval = function __detectEval() {
+        var current;
+        current = this;
+        this.directCallToEvalScope = true;
+        do {
+            current.dynamic = true;
+            current = current.upper;
+        } while (current);
+    };
+
+    Scope.prototype.__detectThis = function __detectThis() {
+        this.thisFound = true;
+    };
+
+    Scope.prototype.__isClosed = function isClosed() {
+        return this.left === null;
+    };
+
+    // API Scope#resolve(name)
+    // returns resolved reference
+    Scope.prototype.resolve = function resolve(ident) {
+        var ref, i, iz;
+        assert(this.__isClosed(), 'scope should be closed');
+        assert(ident.type === Syntax.Identifier, 'target should be identifier');
+        for (i = 0, iz = this.references.length; i < iz; ++i) {
+            ref = this.references[i];
+            if (ref.identifier === ident) {
+                return ref;
+            }
+        }
+        return null;
+    };
+
+    // API Scope#isStatic
+    // returns this scope is static
+    Scope.prototype.isStatic = function isStatic() {
+        return !this.dynamic;
+    };
+
+    // API Scope#isArgumentsMaterialized
+    // return this scope has materialized arguments
+    Scope.prototype.isArgumentsMaterialized = function isArgumentsMaterialized() {
+        // TODO(Constellation)
+        // We can more aggressive on this condition like this.
+        //
+        // function t() {
+        //     // arguments of t is always hidden.
+        //     function arguments() {
+        //     }
+        // }
+        var variable;
+
+        // This is not function scope
+        if (this.type !== 'function') {
+            return true;
+        }
+
+        if (!this.isStatic()) {
+            return true;
+        }
+
+        variable = this.set.get('arguments');
+        assert(variable, 'always have arguments variable');
+        return variable.tainted || variable.references.length  !== 0;
+    };
+
+    // API Scope#isThisMaterialized
+    // return this scope has materialized `this` reference
+    Scope.prototype.isThisMaterialized = function isThisMaterialized() {
+        // This is not function scope
+        if (this.type !== 'function') {
+            return true;
+        }
+        if (!this.isStatic()) {
+            return true;
+        }
+        return this.thisFound;
+    };
+
+    Scope.mangledName = '__$escope$__';
+
+    Scope.prototype.attach = function attach() {
+        if (!this.functionExpressionScope) {
+            this.block[Scope.mangledName] = this;
+        }
+    };
+
+    Scope.prototype.detach = function detach() {
+        if (!this.functionExpressionScope) {
+            delete this.block[Scope.mangledName];
+        }
+    };
+
+    Scope.prototype.isUsedName = function (name) {
+        if (this.set.has(name)) {
+            return true;
+        }
+        for (var i = 0, iz = this.through.length; i < iz; ++i) {
+            if (this.through[i].identifier.name === name) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * @class ScopeManager
+     */
+    function ScopeManager(scopes) {
+        this.scopes = scopes;
+        this.attached = false;
+    }
+
+    // Returns appropliate scope for this node
+    ScopeManager.prototype.__get = function __get(node) {
+        var i, iz, scope;
+        if (this.attached) {
+            return node[Scope.mangledName] || null;
+        }
+        if (Scope.isScopeRequired(node)) {
+            for (i = 0, iz = this.scopes.length; i < iz; ++i) {
+                scope = this.scopes[i];
+                if (!scope.functionExpressionScope) {
+                    if (scope.block === node) {
+                        return scope;
+                    }
+                }
+            }
+        }
+        return null;
+    };
+
+    ScopeManager.prototype.acquire = function acquire(node) {
+        return this.__get(node);
+    };
+
+    ScopeManager.prototype.release = function release(node) {
+        var scope = this.__get(node);
+        if (scope) {
+            scope = scope.upper;
+            while (scope) {
+                if (!scope.functionExpressionScope) {
+                    return scope;
+                }
+                scope = scope.upper;
+            }
+        }
+        return null;
+    };
+
+    ScopeManager.prototype.attach = function attach() {
+        var i, iz;
+        for (i = 0, iz = this.scopes.length; i < iz; ++i) {
+            this.scopes[i].attach();
+        }
+        this.attached = true;
+    };
+
+    ScopeManager.prototype.detach = function detach() {
+        var i, iz;
+        for (i = 0, iz = this.scopes.length; i < iz; ++i) {
+            this.scopes[i].detach();
+        }
+        this.attached = false;
+    };
+
+    Scope.isScopeRequired = function isScopeRequired(node) {
+        return Scope.isVariableScopeRequired(node) || node.type === Syntax.WithStatement || node.type === Syntax.CatchClause;
+    };
+
+    Scope.isVariableScopeRequired = function isVariableScopeRequired(node) {
+        return node.type === Syntax.Program || node.type === Syntax.FunctionExpression || node.type === Syntax.FunctionDeclaration;
+    };
+
+    /**
+     * Main interface function. Takes an Esprima syntax tree and returns the
+     * analyzed scopes.
+     * @function analyze
+     * @param {esprima.Tree} tree
+     * @param {Object} providedOptions - Options that tailor the scope analysis
+     * @param {boolean} [providedOptions.optimistic=false] - the optimistic flag
+     * @param {boolean} [providedOptions.directive=false]- the directive flag
+     * @param {boolean} [providedOptions.ignoreEval=false]- whether to check 'eval()' calls
+     * @return {ScopeManager}
+     */
+    function analyze(tree, providedOptions) {
+        var resultScopes;
+
+        options = updateDeeply(defaultOptions(), providedOptions);
+        resultScopes = scopes = [];
+        currentScope = null;
+        globalScope = null;
+
+        // attach scope and collect / resolve names
+        estraverse.traverse(tree, {
+            enter: function enter(node) {
+                var i, iz, decl;
+                if (Scope.isScopeRequired(node)) {
+                    new Scope(node, {});
+                }
+
+                switch (node.type) {
+                case Syntax.AssignmentExpression:
+                    if (node.operator === '=') {
+                        currentScope.__referencing(node.left, Reference.WRITE, node.right, (!currentScope.isStrict && node.left.name != null) && node);
+                    } else {
+                        currentScope.__referencing(node.left, Reference.RW, node.right);
+                    }
+                    currentScope.__referencing(node.right);
+                    break;
+
+                case Syntax.ArrayExpression:
+                    for (i = 0, iz = node.elements.length; i < iz; ++i) {
+                        currentScope.__referencing(node.elements[i]);
+                    }
+                    break;
+
+                case Syntax.BlockStatement:
+                    break;
+
+                case Syntax.BinaryExpression:
+                    currentScope.__referencing(node.left);
+                    currentScope.__referencing(node.right);
+                    break;
+
+                case Syntax.BreakStatement:
+                    break;
+
+                case Syntax.CallExpression:
+                    currentScope.__referencing(node.callee);
+                    for (i = 0, iz = node['arguments'].length; i < iz; ++i) {
+                        currentScope.__referencing(node['arguments'][i]);
+                    }
+
+                    // check this is direct call to eval
+                    if (!options.ignoreEval && node.callee.type === Syntax.Identifier && node.callee.name === 'eval') {
+                        currentScope.variableScope.__detectEval();
+                    }
+                    break;
+
+                case Syntax.CatchClause:
+                    currentScope.__define(node.param, {
+                        type: Variable.CatchClause,
+                        name: node.param,
+                        node: node
+                    });
+                    break;
+
+                case Syntax.ConditionalExpression:
+                    currentScope.__referencing(node.test);
+                    currentScope.__referencing(node.consequent);
+                    currentScope.__referencing(node.alternate);
+                    break;
+
+                case Syntax.ContinueStatement:
+                    break;
+
+                case Syntax.DirectiveStatement:
+                    break;
+
+                case Syntax.DoWhileStatement:
+                    currentScope.__referencing(node.test);
+                    break;
+
+                case Syntax.DebuggerStatement:
+                    break;
+
+                case Syntax.EmptyStatement:
+                    break;
+
+                case Syntax.ExpressionStatement:
+                    currentScope.__referencing(node.expression);
+                    break;
+
+                case Syntax.ForStatement:
+                    currentScope.__referencing(node.init);
+                    currentScope.__referencing(node.test);
+                    currentScope.__referencing(node.update);
+                    break;
+
+                case Syntax.ForInStatement:
+                    if (node.left.type === Syntax.VariableDeclaration) {
+                        currentScope.__referencing(node.left.declarations[0].id, Reference.WRITE, null, false);
+                    } else {
+                        currentScope.__referencing(node.left, Reference.WRITE, null, (!currentScope.isStrict && node.left.name != null) && node);
+                    }
+                    currentScope.__referencing(node.right);
+                    break;
+
+                case Syntax.FunctionDeclaration:
+                    // FunctionDeclaration name is defined in upper scope
+                    currentScope.upper.__define(node.id, {
+                        type: Variable.FunctionName,
+                        name: node.id,
+                        node: node
+                    });
+                    for (i = 0, iz = node.params.length; i < iz; ++i) {
+                        currentScope.__define(node.params[i], {
+                            type: Variable.Parameter,
+                            name: node.params[i],
+                            node: node,
+                            index: i
+                        });
+                    }
+                    break;
+
+                case Syntax.FunctionExpression:
+                    // id is defined in upper scope
+                    for (i = 0, iz = node.params.length; i < iz; ++i) {
+                        currentScope.__define(node.params[i], {
+                            type: Variable.Parameter,
+                            name: node.params[i],
+                            node: node,
+                            index: i
+                        });
+                    }
+                    break;
+
+                case Syntax.Identifier:
+                    break;
+
+                case Syntax.IfStatement:
+                    currentScope.__referencing(node.test);
+                    break;
+
+                case Syntax.Literal:
+                    break;
+
+                case Syntax.LabeledStatement:
+                    break;
+
+                case Syntax.LogicalExpression:
+                    currentScope.__referencing(node.left);
+                    currentScope.__referencing(node.right);
+                    break;
+
+                case Syntax.MemberExpression:
+                    currentScope.__referencing(node.object);
+                    if (node.computed) {
+                        currentScope.__referencing(node.property);
+                    }
+                    break;
+
+                case Syntax.NewExpression:
+                    currentScope.__referencing(node.callee);
+                    for (i = 0, iz = node['arguments'].length; i < iz; ++i) {
+                        currentScope.__referencing(node['arguments'][i]);
+                    }
+                    break;
+
+                case Syntax.ObjectExpression:
+                    break;
+
+                case Syntax.Program:
+                    break;
+
+                case Syntax.Property:
+                    currentScope.__referencing(node.value);
+                    break;
+
+                case Syntax.ReturnStatement:
+                    currentScope.__referencing(node.argument);
+                    break;
+
+                case Syntax.SequenceExpression:
+                    for (i = 0, iz = node.expressions.length; i < iz; ++i) {
+                        currentScope.__referencing(node.expressions[i]);
+                    }
+                    break;
+
+                case Syntax.SwitchStatement:
+                    currentScope.__referencing(node.discriminant);
+                    break;
+
+                case Syntax.SwitchCase:
+                    currentScope.__referencing(node.test);
+                    break;
+
+                case Syntax.ThisExpression:
+                    currentScope.variableScope.__detectThis();
+                    break;
+
+                case Syntax.ThrowStatement:
+                    currentScope.__referencing(node.argument);
+                    break;
+
+                case Syntax.TryStatement:
+                    break;
+
+                case Syntax.UnaryExpression:
+                    currentScope.__referencing(node.argument);
+                    break;
+
+                case Syntax.UpdateExpression:
+                    currentScope.__referencing(node.argument, Reference.RW, null);
+                    break;
+
+                case Syntax.VariableDeclaration:
+                    for (i = 0, iz = node.declarations.length; i < iz; ++i) {
+                        decl = node.declarations[i];
+                        currentScope.variableScope.__define(decl.id, {
+                            type: Variable.Variable,
+                            name: decl.id,
+                            node: decl,
+                            index: i,
+                            parent: node
+                        });
+                        if (decl.init) {
+                            // initializer is found
+                            currentScope.__referencing(decl.id, Reference.WRITE, decl.init, false);
+                            currentScope.__referencing(decl.init);
+                        }
+                    }
+                    break;
+
+                case Syntax.VariableDeclarator:
+                    break;
+
+                case Syntax.WhileStatement:
+                    currentScope.__referencing(node.test);
+                    break;
+
+                case Syntax.WithStatement:
+                    // WithStatement object is referenced at upper scope
+                    currentScope.upper.__referencing(node.object);
+                    break;
+                }
+            },
+
+            leave: function leave(node) {
+                while (currentScope && node === currentScope.block) {
+                    currentScope.__close();
+                }
+            }
+        });
+
+        assert(currentScope === null);
+        globalScope = null;
+        scopes = null;
+        options = null;
+
+        return new ScopeManager(resultScopes);
+    }
+
+    /** @name module:escope.version */
+    exports.version = '1.0.1';
+    /** @name module:escope.Reference */
+    exports.Reference = Reference;
+    /** @name module:escope.Variable */
+    exports.Variable = Variable;
+    /** @name module:escope.Scope */
+    exports.Scope = Scope;
+    /** @name module:escope.ScopeManager */
+    exports.ScopeManager = ScopeManager;
+    /** @name module:escope.analyze */
+    exports.analyze = analyze;
+}, this));
+/* vim: set sw=4 ts=4 et tw=80 : */
+
+},{"estraverse":40}],39:[function(require,module,exports){
 /*
   Copyright (C) 2013 Ariya Hidayat <ariya.hidayat@gmail.com>
   Copyright (C) 2013 Thaddee Tyl <thaddee.tyl@gmail.com>
@@ -16377,7 +17575,697 @@ parseYieldExpression: true
 }));
 /* vim: set sw=4 ts=4 et tw=80 : */
 
-},{}],39:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
+/*
+  Copyright (C) 2012-2013 Yusuke Suzuki <utatane.tea@gmail.com>
+  Copyright (C) 2012 Ariya Hidayat <ariya.hidayat@gmail.com>
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+  DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+  THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+/*jslint vars:false, bitwise:true*/
+/*jshint indent:4*/
+/*global exports:true, define:true*/
+(function (root, factory) {
+    'use strict';
+
+    // Universal Module Definition (UMD) to support AMD, CommonJS/Node.js,
+    // and plain browser loading,
+    if (typeof define === 'function' && define.amd) {
+        define(['exports'], factory);
+    } else if (typeof exports !== 'undefined') {
+        factory(exports);
+    } else {
+        factory((root.estraverse = {}));
+    }
+}(this, function (exports) {
+    'use strict';
+
+    var Syntax,
+        isArray,
+        VisitorOption,
+        VisitorKeys,
+        BREAK,
+        SKIP;
+
+    Syntax = {
+        AssignmentExpression: 'AssignmentExpression',
+        ArrayExpression: 'ArrayExpression',
+        ArrayPattern: 'ArrayPattern',
+        ArrowFunctionExpression: 'ArrowFunctionExpression',
+        BlockStatement: 'BlockStatement',
+        BinaryExpression: 'BinaryExpression',
+        BreakStatement: 'BreakStatement',
+        CallExpression: 'CallExpression',
+        CatchClause: 'CatchClause',
+        ClassBody: 'ClassBody',
+        ClassDeclaration: 'ClassDeclaration',
+        ClassExpression: 'ClassExpression',
+        ConditionalExpression: 'ConditionalExpression',
+        ContinueStatement: 'ContinueStatement',
+        DebuggerStatement: 'DebuggerStatement',
+        DirectiveStatement: 'DirectiveStatement',
+        DoWhileStatement: 'DoWhileStatement',
+        EmptyStatement: 'EmptyStatement',
+        ExpressionStatement: 'ExpressionStatement',
+        ForStatement: 'ForStatement',
+        ForInStatement: 'ForInStatement',
+        FunctionDeclaration: 'FunctionDeclaration',
+        FunctionExpression: 'FunctionExpression',
+        Identifier: 'Identifier',
+        IfStatement: 'IfStatement',
+        Literal: 'Literal',
+        LabeledStatement: 'LabeledStatement',
+        LogicalExpression: 'LogicalExpression',
+        MemberExpression: 'MemberExpression',
+        MethodDefinition: 'MethodDefinition',
+        NewExpression: 'NewExpression',
+        ObjectExpression: 'ObjectExpression',
+        ObjectPattern: 'ObjectPattern',
+        Program: 'Program',
+        Property: 'Property',
+        ReturnStatement: 'ReturnStatement',
+        SequenceExpression: 'SequenceExpression',
+        SwitchStatement: 'SwitchStatement',
+        SwitchCase: 'SwitchCase',
+        ThisExpression: 'ThisExpression',
+        ThrowStatement: 'ThrowStatement',
+        TryStatement: 'TryStatement',
+        UnaryExpression: 'UnaryExpression',
+        UpdateExpression: 'UpdateExpression',
+        VariableDeclaration: 'VariableDeclaration',
+        VariableDeclarator: 'VariableDeclarator',
+        WhileStatement: 'WhileStatement',
+        WithStatement: 'WithStatement',
+        YieldExpression: 'YieldExpression'
+    };
+
+    function ignoreJSHintError() { }
+
+    isArray = Array.isArray;
+    if (!isArray) {
+        isArray = function isArray(array) {
+            return Object.prototype.toString.call(array) === '[object Array]';
+        };
+    }
+
+    function deepCopy(obj) {
+        var ret = {}, key, val;
+        for (key in obj) {
+            if (obj.hasOwnProperty(key)) {
+                val = obj[key];
+                if (typeof val === 'object' && val !== null) {
+                    ret[key] = deepCopy(val);
+                } else {
+                    ret[key] = val;
+                }
+            }
+        }
+        return ret;
+    }
+
+    function shallowCopy(obj) {
+        var ret = {}, key;
+        for (key in obj) {
+            if (obj.hasOwnProperty(key)) {
+                ret[key] = obj[key];
+            }
+        }
+        return ret;
+    }
+    ignoreJSHintError(shallowCopy);
+
+    // based on LLVM libc++ upper_bound / lower_bound
+    // MIT License
+
+    function upperBound(array, func) {
+        var diff, len, i, current;
+
+        len = array.length;
+        i = 0;
+
+        while (len) {
+            diff = len >>> 1;
+            current = i + diff;
+            if (func(array[current])) {
+                len = diff;
+            } else {
+                i = current + 1;
+                len -= diff + 1;
+            }
+        }
+        return i;
+    }
+
+    function lowerBound(array, func) {
+        var diff, len, i, current;
+
+        len = array.length;
+        i = 0;
+
+        while (len) {
+            diff = len >>> 1;
+            current = i + diff;
+            if (func(array[current])) {
+                i = current + 1;
+                len -= diff + 1;
+            } else {
+                len = diff;
+            }
+        }
+        return i;
+    }
+    ignoreJSHintError(lowerBound);
+
+    VisitorKeys = {
+        AssignmentExpression: ['left', 'right'],
+        ArrayExpression: ['elements'],
+        ArrayPattern: ['elements'],
+        ArrowFunctionExpression: ['params', 'defaults', 'rest', 'body'],
+        BlockStatement: ['body'],
+        BinaryExpression: ['left', 'right'],
+        BreakStatement: ['label'],
+        CallExpression: ['callee', 'arguments'],
+        CatchClause: ['param', 'body'],
+        ClassBody: ['body'],
+        ClassDeclaration: ['id', 'body', 'superClass'],
+        ClassExpression: ['id', 'body', 'superClass'],
+        ConditionalExpression: ['test', 'consequent', 'alternate'],
+        ContinueStatement: ['label'],
+        DebuggerStatement: [],
+        DirectiveStatement: [],
+        DoWhileStatement: ['body', 'test'],
+        EmptyStatement: [],
+        ExpressionStatement: ['expression'],
+        ForStatement: ['init', 'test', 'update', 'body'],
+        ForInStatement: ['left', 'right', 'body'],
+        FunctionDeclaration: ['id', 'params', 'defaults', 'rest', 'body'],
+        FunctionExpression: ['id', 'params', 'defaults', 'rest', 'body'],
+        Identifier: [],
+        IfStatement: ['test', 'consequent', 'alternate'],
+        Literal: [],
+        LabeledStatement: ['label', 'body'],
+        LogicalExpression: ['left', 'right'],
+        MemberExpression: ['object', 'property'],
+        MethodDefinition: ['key', 'value'],
+        NewExpression: ['callee', 'arguments'],
+        ObjectExpression: ['properties'],
+        ObjectPattern: ['properties'],
+        Program: ['body'],
+        Property: ['key', 'value'],
+        ReturnStatement: ['argument'],
+        SequenceExpression: ['expressions'],
+        SwitchStatement: ['discriminant', 'cases'],
+        SwitchCase: ['test', 'consequent'],
+        ThisExpression: [],
+        ThrowStatement: ['argument'],
+        TryStatement: ['block', 'handlers', 'handler', 'guardedHandlers', 'finalizer'],
+        UnaryExpression: ['argument'],
+        UpdateExpression: ['argument'],
+        VariableDeclaration: ['declarations'],
+        VariableDeclarator: ['id', 'init'],
+        WhileStatement: ['test', 'body'],
+        WithStatement: ['object', 'body'],
+        YieldExpression: ['argument']
+    };
+
+    // unique id
+    BREAK = {};
+    SKIP = {};
+
+    VisitorOption = {
+        Break: BREAK,
+        Skip: SKIP
+    };
+
+    function Reference(parent, key) {
+        this.parent = parent;
+        this.key = key;
+    }
+
+    Reference.prototype.replace = function replace(node) {
+        this.parent[this.key] = node;
+    };
+
+    function Element(node, path, wrap, ref) {
+        this.node = node;
+        this.path = path;
+        this.wrap = wrap;
+        this.ref = ref;
+    }
+
+    function Controller() { }
+
+    // API:
+    // return property path array from root to current node
+    Controller.prototype.path = function path() {
+        var i, iz, j, jz, result, element;
+
+        function addToPath(result, path) {
+            if (isArray(path)) {
+                for (j = 0, jz = path.length; j < jz; ++j) {
+                    result.push(path[j]);
+                }
+            } else {
+                result.push(path);
+            }
+        }
+
+        // root node
+        if (!this.__current.path) {
+            return null;
+        }
+
+        // first node is sentinel, second node is root element
+        result = [];
+        for (i = 2, iz = this.__leavelist.length; i < iz; ++i) {
+            element = this.__leavelist[i];
+            addToPath(result, element.path);
+        }
+        addToPath(result, this.__current.path);
+        return result;
+    };
+
+    // API:
+    // return array of parent elements
+    Controller.prototype.parents = function parents() {
+        var i, iz, result;
+
+        // first node is sentinel
+        result = [];
+        for (i = 1, iz = this.__leavelist.length; i < iz; ++i) {
+            result.push(this.__leavelist[i].node);
+        }
+
+        return result;
+    };
+
+    // API:
+    // return current node
+    Controller.prototype.current = function current() {
+        return this.__current.node;
+    };
+
+    Controller.prototype.__execute = function __execute(callback, element) {
+        var previous, result;
+
+        result = undefined;
+
+        previous  = this.__current;
+        this.__current = element;
+        this.__state = null;
+        if (callback) {
+            result = callback.call(this, element.node, this.__leavelist[this.__leavelist.length - 1].node);
+        }
+        this.__current = previous;
+
+        return result;
+    };
+
+    // API:
+    // notify control skip / break
+    Controller.prototype.notify = function notify(flag) {
+        this.__state = flag;
+    };
+
+    // API:
+    // skip child nodes of current node
+    Controller.prototype.skip = function () {
+        this.notify(SKIP);
+    };
+
+    // API:
+    // break traversals
+    Controller.prototype['break'] = function () {
+        this.notify(BREAK);
+    };
+
+    Controller.prototype.__initialize = function(root, visitor) {
+        this.visitor = visitor;
+        this.root = root;
+        this.__worklist = [];
+        this.__leavelist = [];
+        this.__current = null;
+        this.__state = null;
+    };
+
+    Controller.prototype.traverse = function traverse(root, visitor) {
+        var worklist,
+            leavelist,
+            element,
+            node,
+            nodeType,
+            ret,
+            key,
+            current,
+            current2,
+            candidates,
+            candidate,
+            sentinel;
+
+        this.__initialize(root, visitor);
+
+        sentinel = {};
+
+        // reference
+        worklist = this.__worklist;
+        leavelist = this.__leavelist;
+
+        // initialize
+        worklist.push(new Element(root, null, null, null));
+        leavelist.push(new Element(null, null, null, null));
+
+        while (worklist.length) {
+            element = worklist.pop();
+
+            if (element === sentinel) {
+                element = leavelist.pop();
+
+                ret = this.__execute(visitor.leave, element);
+
+                if (this.__state === BREAK || ret === BREAK) {
+                    return;
+                }
+                continue;
+            }
+
+            if (element.node) {
+
+                ret = this.__execute(visitor.enter, element);
+
+                if (this.__state === BREAK || ret === BREAK) {
+                    return;
+                }
+
+                worklist.push(sentinel);
+                leavelist.push(element);
+
+                if (this.__state === SKIP || ret === SKIP) {
+                    continue;
+                }
+
+                node = element.node;
+                nodeType = element.wrap || node.type;
+                candidates = VisitorKeys[nodeType];
+
+                current = candidates.length;
+                while ((current -= 1) >= 0) {
+                    key = candidates[current];
+                    candidate = node[key];
+                    if (!candidate) {
+                        continue;
+                    }
+
+                    if (!isArray(candidate)) {
+                        worklist.push(new Element(candidate, key, null, null));
+                        continue;
+                    }
+
+                    current2 = candidate.length;
+                    while ((current2 -= 1) >= 0) {
+                        if (!candidate[current2]) {
+                            continue;
+                        }
+                        if ((nodeType === Syntax.ObjectExpression || nodeType === Syntax.ObjectPattern) && 'properties' === candidates[current]) {
+                            element = new Element(candidate[current2], [key, current2], 'Property', null);
+                        } else {
+                            element = new Element(candidate[current2], [key, current2], null, null);
+                        }
+                        worklist.push(element);
+                    }
+                }
+            }
+        }
+    };
+
+    Controller.prototype.replace = function replace(root, visitor) {
+        var worklist,
+            leavelist,
+            node,
+            nodeType,
+            target,
+            element,
+            current,
+            current2,
+            candidates,
+            candidate,
+            sentinel,
+            outer,
+            key;
+
+        this.__initialize(root, visitor);
+
+        sentinel = {};
+
+        // reference
+        worklist = this.__worklist;
+        leavelist = this.__leavelist;
+
+        // initialize
+        outer = {
+            root: root
+        };
+        element = new Element(root, null, null, new Reference(outer, 'root'));
+        worklist.push(element);
+        leavelist.push(element);
+
+        while (worklist.length) {
+            element = worklist.pop();
+
+            if (element === sentinel) {
+                element = leavelist.pop();
+
+                target = this.__execute(visitor.leave, element);
+
+                // node may be replaced with null,
+                // so distinguish between undefined and null in this place
+                if (target !== undefined && target !== BREAK && target !== SKIP) {
+                    // replace
+                    element.ref.replace(target);
+                }
+
+                if (this.__state === BREAK || target === BREAK) {
+                    return outer.root;
+                }
+                continue;
+            }
+
+            target = this.__execute(visitor.enter, element);
+
+            // node may be replaced with null,
+            // so distinguish between undefined and null in this place
+            if (target !== undefined && target !== BREAK && target !== SKIP) {
+                // replace
+                element.ref.replace(target);
+                element.node = target;
+            }
+
+            if (this.__state === BREAK || target === BREAK) {
+                return outer.root;
+            }
+
+            // node may be null
+            node = element.node;
+            if (!node) {
+                continue;
+            }
+
+            worklist.push(sentinel);
+            leavelist.push(element);
+
+            if (this.__state === SKIP || target === SKIP) {
+                continue;
+            }
+
+            nodeType = element.wrap || node.type;
+            candidates = VisitorKeys[nodeType];
+
+            current = candidates.length;
+            while ((current -= 1) >= 0) {
+                key = candidates[current];
+                candidate = node[key];
+                if (!candidate) {
+                    continue;
+                }
+
+                if (!isArray(candidate)) {
+                    worklist.push(new Element(candidate, key, null, new Reference(node, key)));
+                    continue;
+                }
+
+                current2 = candidate.length;
+                while ((current2 -= 1) >= 0) {
+                    if (!candidate[current2]) {
+                        continue;
+                    }
+                    if (nodeType === Syntax.ObjectExpression && 'properties' === candidates[current]) {
+                        element = new Element(candidate[current2], [key, current2], 'Property', new Reference(candidate, current2));
+                    } else {
+                        element = new Element(candidate[current2], [key, current2], null, new Reference(candidate, current2));
+                    }
+                    worklist.push(element);
+                }
+            }
+        }
+
+        return outer.root;
+    };
+
+    function traverse(root, visitor) {
+        var controller = new Controller();
+        return controller.traverse(root, visitor);
+    }
+
+    function replace(root, visitor) {
+        var controller = new Controller();
+        return controller.replace(root, visitor);
+    }
+
+    function extendCommentRange(comment, tokens) {
+        var target;
+
+        target = upperBound(tokens, function search(token) {
+            return token.range[0] > comment.range[0];
+        });
+
+        comment.extendedRange = [comment.range[0], comment.range[1]];
+
+        if (target !== tokens.length) {
+            comment.extendedRange[1] = tokens[target].range[0];
+        }
+
+        target -= 1;
+        if (target >= 0) {
+            comment.extendedRange[0] = tokens[target].range[1];
+        }
+
+        return comment;
+    }
+
+    function attachComments(tree, providedComments, tokens) {
+        // At first, we should calculate extended comment ranges.
+        var comments = [], comment, len, i, cursor;
+
+        if (!tree.range) {
+            throw new Error('attachComments needs range information');
+        }
+
+        // tokens array is empty, we attach comments to tree as 'leadingComments'
+        if (!tokens.length) {
+            if (providedComments.length) {
+                for (i = 0, len = providedComments.length; i < len; i += 1) {
+                    comment = deepCopy(providedComments[i]);
+                    comment.extendedRange = [0, tree.range[0]];
+                    comments.push(comment);
+                }
+                tree.leadingComments = comments;
+            }
+            return tree;
+        }
+
+        for (i = 0, len = providedComments.length; i < len; i += 1) {
+            comments.push(extendCommentRange(deepCopy(providedComments[i]), tokens));
+        }
+
+        // This is based on John Freeman's implementation.
+        cursor = 0;
+        traverse(tree, {
+            enter: function (node) {
+                var comment;
+
+                while (cursor < comments.length) {
+                    comment = comments[cursor];
+                    if (comment.extendedRange[1] > node.range[0]) {
+                        break;
+                    }
+
+                    if (comment.extendedRange[1] === node.range[0]) {
+                        if (!node.leadingComments) {
+                            node.leadingComments = [];
+                        }
+                        node.leadingComments.push(comment);
+                        comments.splice(cursor, 1);
+                    } else {
+                        cursor += 1;
+                    }
+                }
+
+                // already out of owned node
+                if (cursor === comments.length) {
+                    return VisitorOption.Break;
+                }
+
+                if (comments[cursor].extendedRange[0] > node.range[1]) {
+                    return VisitorOption.Skip;
+                }
+            }
+        });
+
+        cursor = 0;
+        traverse(tree, {
+            leave: function (node) {
+                var comment;
+
+                while (cursor < comments.length) {
+                    comment = comments[cursor];
+                    if (node.range[1] < comment.extendedRange[0]) {
+                        break;
+                    }
+
+                    if (node.range[1] === comment.extendedRange[0]) {
+                        if (!node.trailingComments) {
+                            node.trailingComments = [];
+                        }
+                        node.trailingComments.push(comment);
+                        comments.splice(cursor, 1);
+                    } else {
+                        cursor += 1;
+                    }
+                }
+
+                // already out of owned node
+                if (cursor === comments.length) {
+                    return VisitorOption.Break;
+                }
+
+                if (comments[cursor].extendedRange[0] > node.range[1]) {
+                    return VisitorOption.Skip;
+                }
+            }
+        });
+
+        return tree;
+    }
+
+    exports.version = '1.3.3-dev';
+    exports.Syntax = Syntax;
+    exports.traverse = traverse;
+    exports.replace = replace;
+    exports.attachComments = attachComments;
+    exports.VisitorKeys = VisitorKeys;
+    exports.VisitorOption = VisitorOption;
+    exports.Controller = Controller;
+}));
+/* vim: set sw=4 ts=4 et tw=80 : */
+
+},{}],41:[function(require,module,exports){
 "use strict";
 
 var defProp = Object.defineProperty || function(obj, name, desc) {
@@ -16463,7 +18351,7 @@ defProp(exports, "makeAccessor", {
     value: makeAccessor
 });
 
-},{}],40:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 var assert = require("assert");
 var linesModule = require("./lines");
 var fromString = linesModule.fromString;
@@ -16759,7 +18647,7 @@ exports.printComments = function(comments, innerLines) {
     return concat(parts);
 };
 
-},{"./lines":41,"./util":48,"./visitor":49,"assert":63}],41:[function(require,module,exports){
+},{"./lines":43,"./util":50,"./visitor":51,"assert":65}],43:[function(require,module,exports){
 var assert = require("assert");
 var sourceMap = require("source-map");
 var normalizeOptions = require("./options").normalize;
@@ -17564,7 +19452,7 @@ Lp.concat = function(other) {
 // Lines.prototype will be fully populated.
 var emptyLines = fromString("");
 
-},{"./mapping":42,"./options":43,"./types":47,"./util":48,"assert":63,"private":39,"source-map":52}],42:[function(require,module,exports){
+},{"./mapping":44,"./options":45,"./types":49,"./util":50,"assert":65,"private":41,"source-map":54}],44:[function(require,module,exports){
 var assert = require("assert");
 var types = require("./types");
 var isString = types.builtInTypes.string;
@@ -17843,7 +19731,7 @@ function skipChars(
     return sourceCursor;
 }
 
-},{"./lines":41,"./types":47,"./util":48,"assert":63}],43:[function(require,module,exports){
+},{"./lines":43,"./types":49,"./util":50,"assert":65}],45:[function(require,module,exports){
 var defaults = {
     tabWidth: 4,
     useTabs: false,
@@ -17883,7 +19771,7 @@ exports.normalize = function(options) {
     };
 };
 
-},{"esprima":38}],44:[function(require,module,exports){
+},{"esprima":39}],46:[function(require,module,exports){
 var assert = require("assert");
 var types = require("./types");
 var n = types.namedTypes;
@@ -18021,7 +19909,7 @@ function copyAst(node, parent) {
     return node;
 }
 
-},{"./comments":40,"./lines":41,"./options":43,"./patcher":45,"./types":47,"./visitor":49,"assert":63}],45:[function(require,module,exports){
+},{"./comments":42,"./lines":43,"./options":45,"./patcher":47,"./types":49,"./visitor":51,"assert":65}],47:[function(require,module,exports){
 var assert = require("assert");
 var linesModule = require("./lines");
 var typesModule = require("./types");
@@ -18260,7 +20148,7 @@ function findChildReprints(path, oldNode, reprints) {
     return true;
 }
 
-},{"./lines":41,"./types":47,"./util":48,"assert":63,"ast-types":19}],46:[function(require,module,exports){
+},{"./lines":43,"./types":49,"./util":50,"assert":65,"ast-types":19}],48:[function(require,module,exports){
 var assert = require("assert");
 var sourceMap = require("source-map");
 var printComments = require("./comments").printComments;
@@ -19263,7 +21151,7 @@ function maybeAddSemicolon(lines) {
     return lines;
 }
 
-},{"./comments":40,"./lines":41,"./options":43,"./patcher":45,"./types":47,"./util":48,"assert":63,"source-map":52}],47:[function(require,module,exports){
+},{"./comments":42,"./lines":43,"./options":45,"./patcher":47,"./types":49,"./util":50,"assert":65,"source-map":54}],49:[function(require,module,exports){
 var types = require("ast-types");
 var def = types.Type.def;
 
@@ -19276,7 +21164,7 @@ types.finalize();
 
 module.exports = types;
 
-},{"ast-types":19}],48:[function(require,module,exports){
+},{"ast-types":19}],50:[function(require,module,exports){
 var assert = require("assert");
 var getFieldValue = require("./types").getFieldValue;
 var sourceMap = require("source-map");
@@ -19419,7 +21307,7 @@ exports.composeSourceMaps = function(formerMap, latterMap) {
     return smg.toJSON();
 };
 
-},{"./types":47,"assert":63,"source-map":52}],49:[function(require,module,exports){
+},{"./types":49,"assert":65,"source-map":54}],51:[function(require,module,exports){
 var assert = require("assert");
 var Class = require("cls");
 var Node = require("./types").namedTypes.Node;
@@ -19539,7 +21427,7 @@ var Visitor = exports.Visitor = Class.extend({
     }
 });
 
-},{"./types":47,"assert":63,"cls":51}],50:[function(require,module,exports){
+},{"./types":49,"assert":65,"cls":53}],52:[function(require,module,exports){
 var process=require("__browserify_process");var types = require("./lib/types");
 var parse = require("./lib/parser").parse;
 var Printer = require("./lib/printer").Printer;
@@ -19650,7 +21538,7 @@ Object.defineProperties(exports, {
     }
 });
 
-},{"./lib/parser":44,"./lib/printer":46,"./lib/types":47,"./lib/visitor":49,"__browserify_process":65,"fs":62}],51:[function(require,module,exports){
+},{"./lib/parser":46,"./lib/printer":48,"./lib/types":49,"./lib/visitor":51,"__browserify_process":67,"fs":64}],53:[function(require,module,exports){
 // Sentinel value passed to base constructors to skip invoking this.init.
 var populating = {};
 
@@ -19771,7 +21659,7 @@ function extend(newProps) {
 
 module.exports = extend.call(function(){});
 
-},{}],52:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 /*
  * Copyright 2009-2011 Mozilla Foundation and contributors
  * Licensed under the New BSD license. See LICENSE.txt or:
@@ -19781,7 +21669,7 @@ exports.SourceMapGenerator = require('./source-map/source-map-generator').Source
 exports.SourceMapConsumer = require('./source-map/source-map-consumer').SourceMapConsumer;
 exports.SourceNode = require('./source-map/source-node').SourceNode;
 
-},{"./source-map/source-map-consumer":57,"./source-map/source-map-generator":58,"./source-map/source-node":59}],53:[function(require,module,exports){
+},{"./source-map/source-map-consumer":59,"./source-map/source-map-generator":60,"./source-map/source-node":61}],55:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -19880,7 +21768,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./util":60,"amdefine":61}],54:[function(require,module,exports){
+},{"./util":62,"amdefine":63}],56:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -20026,7 +21914,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./base64":55,"amdefine":61}],55:[function(require,module,exports){
+},{"./base64":57,"amdefine":63}],57:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -20070,7 +21958,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":61}],56:[function(require,module,exports){
+},{"amdefine":63}],58:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -20153,7 +22041,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":61}],57:[function(require,module,exports){
+},{"amdefine":63}],59:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -20632,7 +22520,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./array-set":53,"./base64-vlq":54,"./binary-search":56,"./util":60,"amdefine":61}],58:[function(require,module,exports){
+},{"./array-set":55,"./base64-vlq":56,"./binary-search":58,"./util":62,"amdefine":63}],60:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -21014,7 +22902,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./array-set":53,"./base64-vlq":54,"./util":60,"amdefine":61}],59:[function(require,module,exports){
+},{"./array-set":55,"./base64-vlq":56,"./util":62,"amdefine":63}],61:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -21387,7 +23275,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"./source-map-generator":58,"./util":60,"amdefine":61}],60:[function(require,module,exports){
+},{"./source-map-generator":60,"./util":62,"amdefine":63}],62:[function(require,module,exports){
 /* -*- Mode: js; js-indent-level: 2; -*- */
 /*
  * Copyright 2011 Mozilla Foundation and contributors
@@ -21594,7 +23482,7 @@ define(function (require, exports, module) {
 
 });
 
-},{"amdefine":61}],61:[function(require,module,exports){
+},{"amdefine":63}],63:[function(require,module,exports){
 var process=require("__browserify_process"),__filename="/node_modules/recast/node_modules/source-map/node_modules/amdefine/amdefine.js";/** vim: et:ts=4:sw=4:sts=4
  * @license amdefine 0.1.0 Copyright (c) 2011, The Dojo Foundation All Rights Reserved.
  * Available via the MIT or new BSD license.
@@ -21895,9 +23783,9 @@ function amdefine(module, requireFn) {
 
 module.exports = amdefine;
 
-},{"__browserify_process":65,"path":66}],62:[function(require,module,exports){
+},{"__browserify_process":67,"path":68}],64:[function(require,module,exports){
 
-},{}],63:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 // http://wiki.commonjs.org/wiki/Unit_Testing/1.0
 //
 // THIS IS NOT TESTED NOR LIKELY TO WORK OUTSIDE V8!
@@ -22259,7 +24147,7 @@ var objectKeys = Object.keys || function (obj) {
   return keys;
 };
 
-},{"util/":68}],64:[function(require,module,exports){
+},{"util/":70}],66:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -22284,7 +24172,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],65:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 // shim for using process in browser
 
 var process = module.exports = {};
@@ -22339,7 +24227,7 @@ process.chdir = function (dir) {
     throw new Error('process.chdir is not supported');
 };
 
-},{}],66:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 var process=require("__browserify_process");// Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -22565,14 +24453,14 @@ var substr = 'ab'.substr(-1) === 'b'
     }
 ;
 
-},{"__browserify_process":65}],67:[function(require,module,exports){
+},{"__browserify_process":67}],69:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],68:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 var process=require("__browserify_process"),global=typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {};// Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -23160,6 +25048,6 @@ function hasOwnProperty(obj, prop) {
   return Object.prototype.hasOwnProperty.call(obj, prop);
 }
 
-},{"./support/isBuffer":67,"__browserify_process":65,"inherits":64}]},{},[8])
+},{"./support/isBuffer":69,"__browserify_process":67,"inherits":66}]},{},[8])
 (8)
 });

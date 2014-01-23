@@ -33,7 +33,9 @@
     "ast-types": "~0.3.16",
     "recast": "~0.5.7",
     "private": "~0.1.0",
-    "defs": "~0.6.2"
+    "defs": "~0.6.2",
+    "estraverse": "~1.5.0",
+    "escope": "~1.0.1"
   },
   "devDependencies": {
     "mocha": "~1.13.0",

@@ -2,6 +2,15 @@
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
 
+  // since eval is used, need access to the compiler
+
+  if(typeof module !== 'undefined') {
+    var compiler = require('../main.js');
+  }
+  else {
+    var compiler = main.js;
+  }
+
   // vm
 
   var IDLE = 'idle';
@@ -14,38 +23,41 @@
     this.lastEval = null;
     this.state = IDLE;
     this._events = {};
+    this.stepping = false;
   }
 
-  // Machine.prototype.loadProgram = function(fn) {
-  //   this.program = fn;
-  // };
+  // 3 ways to execute code:
+  // 
+  // * run: the main entry point. give it a string and it will being the program
+  // * execute: runs a function instance. use this to run individual
+  //   state machines
+  // * evaluate: evalutes a code string in the global scope
 
-  Machine.prototype.runProgram = function(fn, args) {
+  Machine.prototype.execute = function(fn, debugInfo, thisPtr, args) {
     if(this.state === 'SUSPENDED') {
       return;
     }
 
     this.state = EXECUTING;
 
-    var stepping = this.stepping;
-    var hasbp = this.hasBreakpoints;
+    if(debugInfo) {
+      this.setDebugInfo(new DebugInfo(debugInfo));
+    }
 
-    this.hasBreakpoints = false;
+    var prevStepping = this.stepping;
     this.stepping = false;
 
     var ctx = fn.$ctx = this.getContext();
     ctx.softReset();
-
-    if(args.length) {
-      fn.apply(null, args);
+    if(thisPtr || args) {
+      fn.apply(thisPtr, args || []);
     }
     else {
       fn();
     }
 
-    this.hasBreakpoints = hasbp;
-    this.stepping = stepping;
     this.checkStatus(ctx);
+    this.stepping = prevStepping;
 
     // clean up the function, since this property is used to tell if
     // we are inside our VM or not
@@ -54,11 +66,156 @@
     return ctx.rval;
   };
 
+  Machine.prototype.run = function(code, debugInfo) {
+    if(typeof code === 'string') {
+      var fn = new Function('VM', '$Frame', code);
+      var rootFn = fn(this, Frame);
+    }
+    else {
+      var rootFn = code;
+    }
+
+    this.execute(rootFn, debugInfo);
+    this.globalFn = rootFn;
+  };
+
+  Machine.prototype.continue = function() {
+    if(this.rootFrame && this.state === SUSPENDED) {
+      var top = this.getTopFrame();
+      if(!top.ctx.staticBreakpoint) {
+        // We need to get past this instruction that has a breakpoint, so
+        // turn off breakpoints and step past it, then turn them back on
+        // again and execute normally
+        this.stepping = true;
+        this.hasBreakpoints = false;
+        this.rootFrame.restore();
+      }
+
+      var nextFrame = this.rootFrame.ctx.frame;
+      this.hasBreakpoints = true;
+      this.stepping = false;
+      nextFrame.restore();
+      this.rootFrame = null;
+      this.checkStatus(nextFrame.ctx);
+    }
+  };
+
+  Machine.prototype.step = function() {
+    if(!this.rootFrame) return;
+
+    this.stepping = true;
+    this.hasBreakpoints = false;
+    this.rootFrame.restore();
+    this.hasBreakpoints = true;
+
+    this.checkStatus(this.rootFrame.ctx);
+
+    // rootFrame now points to the new stack
+    var top = this.getTopFrame(this.rootFrame);
+
+    if(this.state === SUSPENDED &&
+       top.ctx.next === this.debugInfo.data[top.machineId].finalLoc) {
+      // if it's waiting to simply return a value, go ahead and run
+      // that step so the user doesn't have to step through each frame
+      // return
+      this.step();
+    }
+  };
+
+  Machine.prototype.stepOver = function() {
+    if(!this.rootFrame) return;
+    var top = this.getTopFrame();
+    var curloc = this.getLocation();
+    var finalLoc = curloc;
+    var biggest = 0;
+    var locs = this.debugInfo.data[top.machineId].locs;
+
+    // find the "biggest" expression in the function that encloses
+    // this one
+    Object.keys(locs).forEach(function(k) {
+      var loc = locs[k];
+
+      if(loc.start.line <= curloc.start.line &&
+         loc.end.line >= curloc.end.line &&
+         loc.start.column <= curloc.start.column &&
+         loc.end.column >= curloc.end.column) {
+
+        var ldiff = ((curloc.start.line - loc.start.line) +
+                     (loc.end.line - curloc.end.line));
+        var cdiff = ((curloc.start.column - loc.start.column) +
+                     (loc.end.column - curloc.end.column));
+        if(ldiff + cdiff > biggest) {
+          finalLoc = loc;
+          biggest = ldiff + cdiff;
+        }
+      }
+    });
+
+    if(finalLoc !== curloc) {
+      while(this.getLocation() !== finalLoc) {
+        this.step();
+      }
+
+      this.step();
+    }
+    else {
+      this.step();
+    }
+  };
+
+  Machine.prototype.evaluate = function(expr) {
+    if(expr === '$_') {
+      return this.lastEval;
+    }
+
+    if(this.rootFrame) {
+      var top = this.getTopFrame();
+      var res = top.evaluate(this, expr);
+
+      // fix the self-referencing pointer
+      res.frame.ctx.frame = res.frame;
+
+      // switch frames to get any updated data
+      var parent = this.getFrameOffset(1);
+      if(parent) {
+        parent.child = res.frame;
+      }
+      else {
+        this.rootFrame = res.frame;
+      }
+
+      this.rootFrame.name = '<top-level>';
+      this.lastEval = res.result;
+      return this.lastEval;
+    }
+    else if(this.globalFn) {
+      // TODO: seek out functions, compile them, and convert them to
+      // assignments
+
+      if(expr.indexOf('function') !== -1) {
+        expr = compiler(expr).code;
+      }
+
+      this.evalArg = expr;
+      this.stepping = true;
+      
+      var ctx = this.getContext();
+      ctx.softReset();
+      ctx.next = -1;
+      ctx.frame = true;
+
+      this.globalFn.$ctx = ctx;
+      (0, this).globalFn();
+
+      return ctx.rval;
+    }
+  };
+
   Machine.prototype.checkStatus = function(ctx) {
-    if(ctx.frame &&
-       (ctx.frame.name !== '<top-level>' || ctx.frame.child)) {
+    if(ctx.frame) {
       // machine was paused
       this.state = SUSPENDED;
+      this.rootFrame = ctx.frame;
 
       if(this.error) {
         this.fire('error', this.error);
@@ -144,39 +301,15 @@
     return top;
   };
 
-  // cache
-
-  Machine.allocCache = function() {
-    this.cacheSize = 30000;
-    this._contexts = new Array(this.cacheSize);
-    this.contextptr = 0;
-    for(var i=0; i<this.cacheSize; i++) {
-      this._contexts[i] = new Context();
-    }
-  };
-
-  Machine.prototype.getContext = function() {
-    if(this.contextptr < this.cacheSize) {
-      return this._contexts[this.contextptr++];
-    }
-    else {
-      return new Context();
-    }
-  };
-
-  Machine.prototype.releaseContext = function() {
-    this.contextptr--;
-  };
-
   Machine.prototype.setDebugInfo = function(info) {
-    this.debugInfo = info;
+    this.debugInfo = info || new DebugInfo([]);
     this.machineBreaks = new Array(this.debugInfo.data.length);
 
     for(var i=0; i<this.debugInfo.data.length; i++) {
       this.machineBreaks[i] = [];
     }
 
-    info.breakpoints.forEach(function(line) {
+    this.debugInfo.breakpoints.forEach(function(line) {
       var pos = info.lineToMachinePos(line);
       if(!pos) return;
 
@@ -188,141 +321,6 @@
         this.machineBreaks[pos.machineId][pos.locId] = true;
       }
     }.bind(this));
-  };
-
-  Machine.prototype.begin = function(code, debugInfo) {
-    var fn = new Function('VM', '$Frame', 'return ' + code.trim());
-    var rootFn = fn(this, $Frame);
-
-    this.beginFunc(rootFn, debugInfo);
-  };
-
-  Machine.prototype.beginFunc = function(func, debugInfo) {
-    if(this.state === 'SUSPENDED') {
-      return;
-    }
-    else if(!debugInfo) {
-      throw new Error('debugInfo required to run');
-    }
-
-    this.setDebugInfo(debugInfo);
-    this.state = EXECUTING;
-    this.stepping = false;
-
-    var ctx = func.$ctx = this.getContext();
-    ctx.softReset();
-    func();
-
-    // a frame should have been returned
-    ctx.frame.name = '<top-level>';
-    this.rootFrame = ctx.frame;
-    this.checkStatus(ctx);    
-  };
-
-  Machine.prototype.continue = function() {
-    if(this.rootFrame && this.state === SUSPENDED) {
-      // We need to get past this instruction that has a breakpoint, so
-      // turn off breakpoints and step past it, then turn them back on
-      // again and execute normally
-      this.stepping = true;
-      this.hasBreakpoints = false;
-      this.rootFrame.restore();
-
-      var nextFrame = this.rootFrame.ctx.frame;
-      this.hasBreakpoints = true;
-      this.stepping = false;
-      nextFrame.restore();
-      this.checkStatus(nextFrame.ctx);
-    }
-  };
-
-  Machine.prototype.step = function() {
-    if(!this.rootFrame) return;
-
-    this.stepping = true;
-    this.hasBreakpoints = false;
-    this.rootFrame.restore();
-    this.hasBreakpoints = true;
-
-    this.checkStatus(this.rootFrame.ctx);
-
-    // rootFrame now points to the new stack
-    var top = this.getTopFrame(this.rootFrame);
-
-    if(this.state === SUSPENDED &&
-       top.ctx.next === this.debugInfo.data[top.machineId].finalLoc) {
-      // if it's waiting to simply return a value, go ahead and run
-      // that step so the user doesn't have to step through each frame
-      // return
-      this.step();
-    }
-  };
-
-  Machine.prototype.stepOver = function() {
-    if(!this.rootFrame) return;
-    var top = this.getTopFrame();
-    var curloc = this.getLocation();
-    var finalLoc = curloc;
-    var biggest = 0;
-    var locs = this.debugInfo.data[top.machineId].locs;
-
-    // find the "biggest" expression in the function that encloses
-    // this one
-    Object.keys(locs).forEach(function(k) {
-      var loc = locs[k];
-
-      if(loc.start.line <= curloc.start.line &&
-         loc.end.line >= curloc.end.line &&
-         loc.start.column <= curloc.start.column &&
-         loc.end.column >= curloc.end.column) {
-
-        var ldiff = ((curloc.start.line - loc.start.line) +
-                     (loc.end.line - curloc.end.line));
-        var cdiff = ((curloc.start.column - loc.start.column) +
-                     (loc.end.column - curloc.end.column));
-        if(ldiff + cdiff > biggest) {
-          finalLoc = loc;
-          biggest = ldiff + cdiff;
-        }
-      }
-    });
-
-    if(finalLoc !== curloc) {
-      while(this.getLocation() !== finalLoc) {
-        this.step();
-      }
-
-      this.step();
-    }
-    else {
-      this.step();
-    }
-  };
-
-  Machine.prototype.evaluate = function(expr) {
-    if(expr === '$_') {
-      return this.lastEval;
-    }
-    else if(this.rootFrame) {
-      var top = this.getTopFrame();
-      var res = top.evaluate(this, expr);
-
-      // fix the self-referencing pointer
-      res.frame.ctx.frame = res.frame;
-
-      // switch frames to get any updated data
-      var parent = this.getFrameOffset(1);
-      if(parent) {
-        parent.child = res.frame;
-      }
-      else {
-        this.rootFrame = res.frame;
-      }
-
-      this.rootFrame.name = '<top-level>';
-      this.lastEval = res.result;
-      return this.lastEval;
-    }
   };
 
   Machine.prototype.isStepping = function() {
@@ -348,15 +346,40 @@
     this.hasBreakpoints = true;
   };
 
+  // cache
+
+  Machine.allocCache = function() {
+    this.cacheSize = 30000;
+    this._contexts = new Array(this.cacheSize);
+    this.contextptr = 0;
+    for(var i=0; i<this.cacheSize; i++) {
+      this._contexts[i] = new Context();
+    }
+  };
+
+  Machine.prototype.getContext = function() {
+    if(this.contextptr < this.cacheSize) {
+      return this._contexts[this.contextptr++];
+    }
+    else {
+      return new Context();
+    }
+  };
+
+  Machine.prototype.releaseContext = function() {
+    this.contextptr--;
+  };
+
+
   // frame
 
-  function Frame(machineId, name, fn, scope, outerScope,
+  function Frame(machineId, name, fn, state, scope,
                  thisPtr, ctx, child) {
     this.machineId = machineId;
     this.name = name;
     this.fn = fn;
+    this.state = state;
     this.scope = scope;
-    this.outerScope = outerScope;
     this.thisPtr = thisPtr;
     this.ctx = ctx;
     this.child = child;

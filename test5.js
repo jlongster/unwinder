@@ -5,10 +5,10 @@ function foo() {
   return 2 + 2;
 }
 
-var src = foo.toString() + '\nvar y = 5 + 5; debugger; var z = foo(); console.log(z);';
+var src = foo.toString() + '\nvar y = 5 + 5; var z = foo(); console.log(z);';
 var output = regenerator(src, { includeDebug: true });
 
-console.log(output.code);
+//console.log(output.code);
 //var code = require('fs').readFileSync('tmp.js', 'utf8');
 var code = output.code;
 var func = new Function('VM', '$Frame', code);
@@ -20,7 +20,9 @@ VM.on('error', function(e) {
 
 var global = func(VM, $Frame);
 VM.run(global, output.debugInfo);
-VM.continue();
+VM.evaluate('function foo() { return 4 + 4; }');
+
+//VM.continue();
 
 function evaluate(expr) {
   VM.evalArg = expr;

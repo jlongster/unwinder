@@ -1,65 +1,37 @@
 
 __debug_sourceURL="test.js";
 var __debugInfo = [{
-      "finalLoc": 21,
-
-      "locs": {
-        "3": {
-          "start": {
-            "line": 9,
-            "column": 12
-          },
-
-          "end": {
-            "line": 9,
-            "column": 17
-          }
-        },
-
-        "12": {
-          "start": {
-            "line": 9,
-            "column": 0
-          },
-
-          "end": {
-            "line": 9,
-            "column": 18
-          }
-        }
-      }
-    }, {
-      "finalLoc": 14,
+      "finalLoc": 15,
 
       "locs": {
         "6": {
           "start": {
-            "line": 5,
-            "column": 2
+            "line": 8,
+            "column": 0
           },
 
           "end": {
-            "line": 5,
-            "column": 11
-          }
-        },
-
-        "10": {
-          "start": {
-            "line": 6,
-            "column": 2
-          },
-
-          "end": {
-            "line": 6,
-            "column": 15
+            "line": 8,
+            "column": 5
           }
         }
       }
+    }, {
+      "finalLoc": 3,
+      "locs": {}
     }];
 
 (function(global) {
   var hasOwn = Object.prototype.hasOwnProperty;
+
+  // since eval is used, need access to the compiler
+
+  if(typeof module !== 'undefined') {
+    var compiler = require('./main.js');
+  }
+  else {
+    var compiler = foo;
+  }
 
   // vm
 
@@ -91,9 +63,10 @@ var __debugInfo = [{
     this.state = EXECUTING;
 
     if(debugInfo) {
-      this.setDebugInfo(debugInfo);
+      this.setDebugInfo(new DebugInfo(debugInfo));
     }
 
+    var prevStepping = this.stepping;
     this.stepping = false;
 
     var ctx = fn.$ctx = this.getContext();
@@ -106,6 +79,7 @@ var __debugInfo = [{
     }
 
     this.checkStatus(ctx);
+    this.stepping = prevStepping;
 
     // clean up the function, since this property is used to tell if
     // we are inside our VM or not
@@ -138,14 +112,12 @@ var __debugInfo = [{
         this.hasBreakpoints = false;
         this.rootFrame.restore();
       }
-      else {
-        console.log('static breakpoint');
-      }
 
       var nextFrame = this.rootFrame.ctx.frame;
       this.hasBreakpoints = true;
       this.stepping = false;
       nextFrame.restore();
+      this.rootFrame = null;
       this.checkStatus(nextFrame.ctx);
     }
   };
@@ -217,7 +189,8 @@ var __debugInfo = [{
     if(expr === '$_') {
       return this.lastEval;
     }
-    else if(this.rootFrame) {
+
+    if(this.rootFrame) {
       var top = this.getTopFrame();
       var res = top.evaluate(this, expr);
 
@@ -236,6 +209,27 @@ var __debugInfo = [{
       this.rootFrame.name = '<top-level>';
       this.lastEval = res.result;
       return this.lastEval;
+    }
+    else if(this.globalFn) {
+      // TODO: seek out functions, compile them, and convert them to
+      // assignments
+
+      if(expr.indexOf('function') !== -1) {
+        expr = compiler(expr).code;
+      }
+
+      this.evalArg = expr;
+      this.stepping = true;
+      
+      var ctx = this.getContext();
+      ctx.softReset();
+      ctx.next = -1;
+      ctx.frame = true;
+
+      this.globalFn.$ctx = ctx;
+      (0, this).globalFn();
+
+      return ctx.rval;
     }
   };
 
@@ -401,13 +395,13 @@ var __debugInfo = [{
 
   // frame
 
-  function Frame(machineId, name, fn, scope, outerScope,
+  function Frame(machineId, name, fn, state, scope,
                  thisPtr, ctx, child) {
     this.machineId = machineId;
     this.name = name;
     this.fn = fn;
+    this.state = state;
     this.scope = scope;
-    this.outerScope = outerScope;
     this.thisPtr = thisPtr;
     this.ctx = ctx;
     this.child = child;
@@ -692,10 +686,10 @@ var __debugInfo = [{
 }).call(this, (function() { return this; })());
 
 var $__global = function() {
-      var foo;
+      var x, foo;
 
-      function $__global() {
-        var $ctx = $__global.$ctx;
+      function $$__global() {
+        var $ctx = $$__global.$ctx;
 
         try {
           if ($ctx.frame) {
@@ -718,9 +712,6 @@ var $__global = function() {
                   throw null;
               }
             } else {
-              if ($ctx.staticBreakpoint)
-                $ctx.next = $ctx.next + 3;
-
               $ctx.frame = null;
               $ctx.childFrame = null;
             }
@@ -733,19 +724,16 @@ var $__global = function() {
 
             switch ($ctx.next) {
             case 0:
-              foo = function foo() {
-                var x, y;
-                var $ctx = foo.$ctx;
+              foo = function $foo() {
+                var $ctx = $foo.$ctx;
 
                 if ($ctx === undefined)
-                  return VM.execute(foo, null, this, arguments);
+                  return VM.execute($foo, null, this, arguments);
 
                 $ctx.isCompiled = true;
 
                 try {
                   if ($ctx.frame) {
-                    x = $ctx.frame.scope.x;
-                    y = $ctx.frame.scope.y;
                     var $child = $ctx.frame.child;
 
                     if ($child) {
@@ -765,8 +753,6 @@ var $__global = function() {
                           throw null;
                       }
                     } else {
-                      if ($ctx.staticBreakpoint)
-                        $ctx.next = $ctx.next + 3;
                       $ctx.frame = null;
                       $ctx.childFrame = null;
                     }
@@ -779,26 +765,12 @@ var $__global = function() {
 
                     switch ($ctx.next) {
                     case 0:
-                      x = 10;
+                      x++;
                       $ctx.next = 3;
                       break;
-                    case 3:
-                      y = 20;
-                      $ctx.next = 6;
-                      break;
-                    case 6:
-                      VM.stepping = true;
-                      $ctx.staticBreakpoint = true;
-                      $ctx.next = 10;
-                      break;
-                    case 10:
-                      $ctx.rval = x = y;
-                      delete $ctx.thrown;
-                      $ctx.next = 14;
-                      break;
                     default:
-                    case 14:
-                      foo.$ctx = undefined;
+                    case 3:
+                      $foo.$ctx = undefined;
                       return $ctx.stop();
                     case -1:
                       $ctx.rval = eval(VM.evalArg);
@@ -811,39 +783,29 @@ var $__global = function() {
                   VM.error = e;
                 }
 
-                $ctx.frame = new $Frame(1, "foo", foo, {
-                  "x": x,
-                  "y": y
-                }, ["foo"], this, $ctx, $ctx.childFrame);
+                $ctx.frame = new $Frame(1, "foo", $foo, {}, [{
+                  "name": "x",
+                  "boxed": false
+                }, {
+                  "name": "foo",
+                  "boxed": false
+                }], this, $ctx, $ctx.childFrame);
 
-                foo.$ctx = undefined;
+                $foo.$ctx = undefined;
               };
 
               $ctx.next = 3;
               break;
             case 3:
-              var $t3 = VM.getContext();
-              $t3.softReset();
-              foo.$ctx = $t3;
-              var $t4 = foo();
-              $ctx.next = 12;
-
-              if ($t3.frame) {
-                $ctx.childFrame = $t3.frame;
-                $ctx.resultLoc = "t2";
-                VM.stepping = true;
-                break;
-              }
-
-              $ctx.t2 = ($t3.isCompiled ? $t3.rval : $t4);
-              VM.releaseContext();
+              x = 0;
+              $ctx.next = 6;
               break;
-            case 12:
+            case 6:
               var $t1 = VM.getContext();
               $t1.softReset();
-              console.log.$ctx = $t1;
-              var $t5 = console.log($ctx.t2);
-              $ctx.next = 21;
+              foo.$ctx = $t1;
+              var $t2 = foo();
+              $ctx.next = 15;
 
               if ($t1.frame) {
                 $ctx.childFrame = $t1.frame;
@@ -852,12 +814,12 @@ var $__global = function() {
                 break;
               }
 
-              $ctx.t0 = ($t1.isCompiled ? $t1.rval : $t5);
+              $ctx.t0 = ($t1.isCompiled ? $t1.rval : $t2);
               VM.releaseContext();
               break;
             default:
-            case 21:
-              $__global.$ctx = undefined;
+            case 15:
+              $$__global.$ctx = undefined;
               return $ctx.stop();
             case -1:
               $ctx.rval = eval(VM.evalArg);
@@ -870,19 +832,33 @@ var $__global = function() {
           VM.error = e;
         }
 
-        $ctx.frame = new $Frame(0, "$__global", $__global, {
+        $ctx.frame = new $Frame(0, "$__global", $$__global, {
+          "x": x,
           "foo": foo
-        }, [], this, $ctx, $ctx.childFrame);
+        }, [{
+          "name": "x",
+          "boxed": false
+        }, {
+          "name": "foo",
+          "boxed": false
+        }], this, $ctx, $ctx.childFrame);
 
-        $__global.$ctx = undefined;
+        $$__global.$ctx = undefined;
       }
 
-      return $__global;
+      return $$__global;
     }();
 
 var VM = new $Machine();
 VM.on("error", function(e) { throw e; });
-VM.run($__global, new $DebugInfo(__debugInfo));
+VM.run($__global, __debugInfo);
 
-console.log(VM.state);
-VM.continue();
+VM.evaluate('foo()');
+VM.evaluate('foo()');
+VM.evaluate('foo()');
+VM.evaluate('foo()');
+
+VM.evaluate('function foo() { x += 2 }');
+console.log(VM.evaluate('x'));
+VM.evaluate('foo()');
+console.log(VM.evaluate('x'));

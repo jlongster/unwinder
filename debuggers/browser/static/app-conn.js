@@ -29,8 +29,8 @@ function format(obj) {
 var client = new Connection(window.parent, 'child');
 client.send({ type: 'ready' });
 
-client.on('begin', function(code, debugInfo) {
-  VM.begin(code, $DebugInfo.fromObject(debugInfo));
+client.on('run', function(code, debugInfo) {
+  VM.run(code, $DebugInfo.fromObject(debugInfo));
 });
 client.on('continue', VM.continue.bind(VM));
 client.on('step', VM.step.bind(VM));

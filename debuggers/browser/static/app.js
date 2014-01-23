@@ -121,18 +121,11 @@ var App = React.createClass({
     }
 
     var src = editor.getValue().slice(node.range[0], node.range[1]);
-    
-    if(node.type === 'FunctionDeclaration') {
-      // compile function declarations
-      var output = this.compile(src);
-      src = output.code;
-    }
-
     this.state.client.send({ type: 'eval',
                              args: [src] }, function(err, res) {
                                console.log(err, res);
                              });
-    this.setState({ debugInfo: debugInfo });
+    //this.setState({ debugInfo: debugInfo });
   },
 
   run: function() {
@@ -158,6 +151,7 @@ var App = React.createClass({
       '<body>' +
       '<canvas></canvas>' +
       '<script src="/lib/lodash.min.js"></script>' + // temporary
+      '<script src="/probe.js"></script>' +
       '<script src="/vm.js"></script>' +
       '<script>var VM = new $Machine();</script>' +
       '<script src="/conn.js"></script>' +
@@ -179,7 +173,7 @@ var App = React.createClass({
         }
       });
 
-      client.send({ type: 'begin',
+      client.send({ type: 'run',
                     args: [output.code, debugInfo] });
     });
 

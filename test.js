@@ -1,9 +1,8 @@
 
+var x = 0;
+
 function foo() {
-  var x = 10;
-  var y = 20;
-  debugger;
-  return x = y;
+  x++;
 }
 
-console.log(foo());
+foo();

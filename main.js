@@ -99,7 +99,7 @@ function regenerator(source, options) {
 
     appendix += 'var VM = new $Machine();\n' +
       'VM.on("error", function(e) { throw e; });\n' +
-      'VM.run($__global, new $DebugInfo(__debugInfo));';
+      'VM.run($__global, __debugInfo);';
   }
 
   if(options.includeDebug) {
