@@ -1,9 +1,7 @@
 
-var x = 0;
-
-function foo() {
-  console.log(x);
-  x++;
+try {
+  bar();
 }
-
-foo();
+catch(e) {
+  console.log(5);
+}

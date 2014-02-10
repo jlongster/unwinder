@@ -34,7 +34,11 @@ client.on('run', function(code, debugInfo) {
 });
 client.on('continue', VM.continue.bind(VM));
 client.on('step', VM.step.bind(VM));
-client.on('stepOver', VM.step.bind(VM));
+client.on('stepOver', VM.stepOver.bind(VM));
+
+client.on('setDebugInfo', function(info) {
+  VM.setDebugInfo($DebugInfo.fromObject(info));
+});
 
 client.on('query', function(names) {
   var res = names.split(',').map(function(name) {
@@ -45,7 +49,7 @@ client.on('query', function(names) {
       var top = VM.getTopFrame();
       if(!top) return [];
 
-      return _.uniq(_.keys(top.scope).concat(top.outerScope));
+      return top.scope.map(function(v) { return v.name; });
     case 'stack':
       var frame = VM.getRootFrame();
       var stack = [];

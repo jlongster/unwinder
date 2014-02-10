@@ -330,7 +330,7 @@ Ep.clearPendingException = function(assignee) {
     this.emitAssign(assignee, cp);
   }
 
-  this.emit(b.unaryExpression("delete", cp), true);
+  this.emitAssign(cp, b.literal(null));
 };
 
 // Emits code for an unconditional jump to the given location, even if the
@@ -382,10 +382,10 @@ Ep.makeTempId = function() {
     return b.identifier("$t" + nextTempId++)
 };
 
-Ep.getMachine = function(funcName, varNames, limitToPoint) {
+Ep.getMachine = function(funcName, varNames) {
   return {
     contextId: this.contextId.name,
-    ast: this.getDispatchLoop(funcName, varNames, limitToPoint)
+    ast: this.getDispatchLoop(funcName, varNames)
   };
 };
 
@@ -404,7 +404,7 @@ Ep.resolveEmptyJumps = function() {
        stmt.expression.left.object.name == '$ctx' &&
        stmt.expression.left.property.name == 'next') {
 
-      forwards[i] = stmt.expression.right.value;
+      forwards[i] = stmt.expression.right;
       // TODO: actually remove these cases from the output
     }
   });
@@ -413,7 +413,7 @@ Ep.resolveEmptyJumps = function() {
     if(n.Literal.check(node) &&
        node._location &&
        forwards.hasOwnProperty(node.value)) {
-      node.value = forwards[node.value];
+      this.replace(forwards[node.value]);
     }
   });
 };
@@ -429,12 +429,8 @@ Ep.resolveEmptyJumps = function() {
 //
 // Each marked location in this.listing will correspond to one generated
 // case statement.
-Ep.getDispatchLoop = function(funcName, varNames, limitToPoint) {
+Ep.getDispatchLoop = function(funcName, varNames) {
   var self = this;
-
-  // The limitToPoint option is not used yet. It is a attempt to
-  // partially evaluate code, but I doubt we should do it this way.
-  // Keep it in for now, but I'll probably remove it in the future.
 
   // If we encounter a break, continue, or return statement in a switch
   // case, we can skip the rest of the statements until the next case.
@@ -738,7 +734,7 @@ Ep.explodeStatement = function(path, labelId) {
     var keys = self.emitAssign(
       self.makeTempVar(),
       b.callExpression(
-        self.contextProperty("keys"),
+        self.vmProperty("keys"),
         [self.explodeExpression(path.get("right"))]
       ),
       path.get("right").node.loc
@@ -909,14 +905,14 @@ Ep.explodeStatement = function(path, labelId) {
       // Finally blocks examine their .nextLocTempVar property to figure
       // out where to jump next, so we must set that property to the
       // fall-through location, by default.
-      self.emitAssign(finallyEntry.nextLocTempVar, after);
+      self.emitAssign(finallyEntry.nextLocTempVar, after, path.node.loc);
     }
 
     var tryEntry = new leap.TryEntry(catchEntry, finallyEntry);
 
     // Push information about this try statement so that the runtime can
     // figure out what to do if it gets an uncaught exception.
-    self.pushTry(tryEntry);
+    self.pushTry(tryEntry, path.node.loc);
 
     self.leapManager.withEntry(tryEntry, function() {
       self.explodeStatement(path.get("block"));
@@ -924,7 +920,7 @@ Ep.explodeStatement = function(path, labelId) {
       if (catchLoc) {
         // If execution leaves the try block normally, the associated
         // catch block no longer applies.
-        self.popCatch(catchEntry);
+        self.popCatch(catchEntry, path.node.loc);
 
         if (finallyLoc) {
           // If we have both a catch block and a finally block, then
@@ -943,7 +939,7 @@ Ep.explodeStatement = function(path, labelId) {
         // On entering a catch block, we must not have exited the
         // associated try block normally, so we won't have called
         // context.popCatch yet.  Call it here instead.
-        self.popCatch(catchEntry);
+        self.popCatch(catchEntry, path.node.loc);
 
         var bodyPath = path.get("handler", "body");
         var safeParam = self.makeTempVar();
@@ -971,7 +967,7 @@ Ep.explodeStatement = function(path, labelId) {
       if (finallyLoc) {
         self.mark(finallyLoc);
 
-        self.popFinally(finallyEntry);
+        self.popFinally(finallyEntry, path.node.loc);
 
         self.leapManager.withEntry(finallyEntry, function() {
           self.explodeStatement(path.get("finalizer"));
@@ -988,7 +984,7 @@ Ep.explodeStatement = function(path, labelId) {
   case "ThrowStatement":
     self.emit(b.throwStatement(
       self.explodeExpression(path.get("argument"))
-    ));
+    ), path.node.loc);
 
     break;
 
@@ -1013,14 +1009,15 @@ Ep.explodeStatement = function(path, labelId) {
 
 // Emit a runtime call to context.pushTry(catchLoc, finallyLoc) so that
 // the runtime wrapper can dispatch uncaught exceptions appropriately.
-Ep.pushTry = function(tryEntry) {
+Ep.pushTry = function(tryEntry, loc) {
   assert.ok(tryEntry instanceof leap.TryEntry);
 
   var nil = b.literal(null);
   var catchEntry = tryEntry.catchEntry;
   var finallyEntry = tryEntry.finallyEntry;
-  var method = this.contextProperty("pushTry");
+  var method = this.vmProperty("pushTry");
   var args = [
+    b.identifier('tryStack'),
     catchEntry && catchEntry.firstLoc || nil,
     finallyEntry && finallyEntry.firstLoc || nil,
     finallyEntry && b.literal(
@@ -1028,12 +1025,12 @@ Ep.pushTry = function(tryEntry) {
     ) || nil
   ];
 
-  this.emit(b.callExpression(method, args));
+  this.emit(withLoc(b.callExpression(method, args), loc));
 };
 
 // Emit a runtime call to context.popCatch(catchLoc) so that the runtime
 // wrapper knows when a catch block reported to pushTry no longer applies.
-Ep.popCatch = function(catchEntry) {
+Ep.popCatch = function(catchEntry, loc) {
   var catchLoc;
 
   if (catchEntry) {
@@ -1047,16 +1044,16 @@ Ep.popCatch = function(catchEntry) {
   // TODO Think about not emitting anything when catchEntry === null.  For
   // now, emitting context.popCatch(null) is good for sanity checking.
 
-  this.emit(b.callExpression(
-    this.contextProperty("popCatch"),
-    [catchLoc]
-  ));
+  this.emit(withLoc(b.callExpression(
+    this.vmProperty("popCatch"),
+    [b.identifier('tryStack'), catchLoc]
+  ), loc));
 };
 
 // Emit a runtime call to context.popFinally(finallyLoc) so that the
 // runtime wrapper knows when a finally block reported to pushTry no
 // longer applies.
-Ep.popFinally = function(finallyEntry) {
+Ep.popFinally = function(finallyEntry, loc) {
   var finallyLoc;
 
   if (finallyEntry) {
@@ -1071,10 +1068,10 @@ Ep.popFinally = function(finallyEntry) {
   // For now, emitting context.popFinally(null) is good for sanity
   // checking.
 
-  this.emit(b.callExpression(
-    this.contextProperty("popFinally"),
-    [finallyLoc]
-  ));
+  this.emit(withLoc(b.callExpression(
+    this.vmProperty("popFinally"),
+    [b.identifier('tryStack'), finallyLoc]
+  ), loc));
 };
 
 Ep.explodeExpression = function(path, ignoreResult) {
@@ -1094,7 +1091,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
     n.Expression.assert(expr);
     if (ignoreResult) {
       var after = loc();
-      self.emit(expr, expr.loc);
+      self.emit(expr);
       self.emitAssign(self.contextProperty("next"), after);
       self.emit(b.breakStatement(), true);
       self.mark(after);
@@ -1198,11 +1195,6 @@ Ep.explodeExpression = function(path, ignoreResult) {
       ), path.node.loc)
     );
 
-    self.emit(b.callExpression(
-      self.getProperty(curContextTmp, 'softReset'),
-      []
-    ), true);
-
     if(n.FunctionExpression.check(newCallee)) {
       callee = self.makeTempId();
       self.emitAssign(callee, newCallee);
@@ -1214,6 +1206,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
     self.emitAssign(self.getProperty(callee, '$ctx'), curContextTmp);
     self.emit(self.declareVar(res.name, b.callExpression(callee, args)),
               true);
+
     self.emitAssign(self.contextProperty("next"), after);
 
     self.emit(
@@ -1373,7 +1366,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
       expr.operator,
       self.explodeExpression(path.get("argument")),
       expr.prefix
-    ), expr.loc));
+    ), path.node.loc));
 
   case "YieldExpression":
     var after = loc();
@@ -1498,8 +1491,10 @@ exports.hoist = function(fun) {
       vars[node.id.name] = node.id;
 
       var parentNode = this.parent.node;
+      // Prefix the name with '$' as it introduces a new scoping rule
+      // and we want the original id to be referenced within the body
       var funcExpr = b.functionExpression(
-        node.id,
+        b.identifier('$' + node.id.name),
         node.params,
         node.body,
         node.generator,
@@ -1774,6 +1769,7 @@ LMp._leapToEntry = function(predicate, defaultLoc) {
 
   n.Literal.assert(loc);
 
+  var finallyEntry;
   while ((finallyEntry = finallyEntries.pop())) {
     this.emitter.emitAssign(finallyEntry.nextLocTempVar, loc);
     loc = finallyEntry.firstLoc;
@@ -2029,40 +2025,88 @@ var hoist = require("./hoist").hoist;
 var Emitter = require("./emit").Emitter;
 var DebugInfo = require("./debug").DebugInfo;
 var escope = require('escope');
+var withLoc = require("./util").withLoc;
 
 exports.transform = function(ast, opts) {
   n.Program.assert(ast);
   var debugInfo = new DebugInfo();
   var nodes = ast.body;
-  var isFunction = nodes.length === 1 && n.Function.check(nodes[0]);
-  var originalId = null;
+  var asExpr = opts.asExpr;
+  var originalExpr = nodes[0];
+  var boxedVars = (opts.scope || []).reduce(function(acc, v) {
+    if(v.boxed) {
+      acc.push(v.name);
+    }
+    return acc;
+  }, []);
 
-  var s = escope.analyze(ast);
-  s.scopes.forEach(function(scope) {
-    if(scope.type != 'global') {
+  var scopes = escope.analyze(ast).scopes;
+
+  // Scan the scopes bottom-up by simply reversing the array. We need
+  // this because we need to detect if an identifier is boxed before
+  // the scope which it is declared in is scanned.
+
+  scopes.reverse();
+  scopes.forEach(function(scope) {
+    if(scope.type !== 'global' || asExpr) {
+
+      if(asExpr) {
+        // We need to also scan the variables to catch top-level
+        // definitions that aren't referenced but might be boxed
+        // (think function re-definitions)
+        scope.variables.forEach(function(v) {
+          if(boxedVars.indexOf(v.name) !== -1) {
+            v.defs.forEach(function(def) { def.name.boxed = true; });
+          }
+        });
+      }
+
       scope.references.forEach(function(r) {
-        if(r.resolved &&
-           r.resolved.scope !== r.from &&
-           r.resolved.defs[0].type !== 'FunctionName') {
+        var defBoxed = r.resolved && r.resolved.defs.reduce(function(acc, def) {
+          return acc || def.name.boxed || boxedVars.indexOf(def.name) !== -1;
+        }, false);
+
+        if(defBoxed ||
+           (!r.resolved &&
+            boxedVars.indexOf(r.identifier.name) !== -1) ||
+           (r.resolved &&
+            r.resolved.scope !== r.from &&
+
+            // completely ignore references to a named function
+            // expression, as that binding is immutabled (super weird)
+            !(r.resolved.defs[0].type === 'FunctionName' &&
+              r.resolved.defs[0].node.type === 'FunctionExpression'))) {
+
           r.identifier.boxed = true;
-          r.resolved.defs.forEach(function(def) {
-            def.name.boxed = true;
-          });
+
+          if(r.resolved) {
+            r.resolved.defs.forEach(function(def) {
+              def.name.boxed = true;
+            });
+          }
         }
       });
     }
   });
 
-  if(!isFunction) {
-    nodes = b.functionExpression(
-      b.identifier('$__global'),
-      [],
-      b.blockStatement(nodes)
-    );
+  if(asExpr) {
+    // If evaluating as an expression, return the last value if it's
+    // an expression
+    var last = nodes.length - 1;
+
+    if(n.ExpressionStatement.check(nodes[last])) {
+      nodes[last] = withLoc(
+        b.returnStatement(nodes[last].expression),
+        nodes[last].loc
+      );
+    }
   }
-  else {
-    originalId = nodes[0].id;
-  }
+
+  nodes = b.functionExpression(
+    b.identifier(asExpr ? '$__eval' : '$__global'),
+    [],
+    b.blockStatement(nodes)
+  );
 
   var rootFn = types.traverse(
     nodes,
@@ -2071,24 +2115,86 @@ exports.transform = function(ast, opts) {
     }
   );
 
-  if(!isFunction) {
+  if(asExpr) {
     rootFn = rootFn.body.body;
-  }
-  else {
-    rootFn = rootFn[0];
-    rootFn = [b.expressionStatement(
-      b.assignmentExpression(
-        '=',
-        originalId,
-        b.functionExpression(
-          rootFn.id,
-          rootFn.params,
-          rootFn.body,
-          rootFn.generator,
-          rootFn.expression
+
+    if(opts.scope) {
+      var vars = opts.scope.map(function(v) { return v.name; });
+      var decl = rootFn[0];
+      if(n.VariableDeclaration.check(decl)) {
+        decl.declarations = decl.declarations.reduce(function(acc, v) {
+          if(vars.indexOf(v.id.name) === -1) {
+            acc.push(v);
+          }
+          return acc;
+        }, []);
+
+        if(!decl.declarations.length) {
+          rootFn[0] = b.expressionStatement(b.literal(null));
+        }
+      }
+    }
+    else {
+      rootFn[0] = b.expressionStatement(b.literal(null));
+    }
+
+    var ctx = b.memberExpression(
+      b.identifier('$__eval'),
+      b.identifier('$ctx'),
+      false
+    );
+
+    rootFn.unshift(b.expressionStatement(
+      b.callExpression(
+        b.memberExpression(
+          b.identifier('VM'),
+          b.identifier('pushState'),
+          false
+        ),
+        []
+      )
+    ));
+
+    rootFn.push(
+      b.expressionStatement(
+        b.assignmentExpression(
+          '=',
+          ctx,
+          b.callExpression(
+            b.memberExpression(
+              b.identifier('VM'),
+              b.identifier('getContext'),
+              false
+            ),
+            []
+          )
         )
       )
-    )];
+    );
+
+    rootFn.push(b.variableDeclaration(
+      'var',
+      [b.variableDeclarator(
+        b.identifier('$__rval'),
+        b.callExpression(b.identifier('$__eval'), [])
+      )]
+    ));
+
+    rootFn.push(b.expressionStatement(
+      b.callExpression(
+        b.memberExpression(
+          b.identifier('VM'),
+          b.identifier('popState'),
+          false
+        ),
+        []
+      )
+    ));
+
+    rootFn.push(b.expressionStatement(b.identifier('$__rval')));
+  }
+  else {
+    rootFn = rootFn.body.body;
   }
 
   ast.body = rootFn;
@@ -2106,15 +2212,16 @@ function newFunctionName() {
 }
 
 function visitNode(node, scope, debugInfo) {
-  if(n.Identifier.check(node) && 
+  if(n.Identifier.check(node) &&
      (!n.VariableDeclarator.check(this.parent.node) ||
       this.parent.node.id !== node) &&
      node.boxed) {
 
-    this.replace(b.memberExpression(node, b.literal(0), true));
+    this.replace(withLoc(b.memberExpression(node, b.literal(0), true),
+                         node.loc));
     return;
   }
-  
+
   if(!n.Function.check(node)) {
     // Note that because we are not returning false here the traversal
     // will continue into the subtree rooted at this node, as desired.
@@ -2132,9 +2239,13 @@ function visitNode(node, scope, debugInfo) {
     ]);
   }
 
-  // TODO: Ensure these identifiers are named uniquely.
-  node.id = (node.id && b.identifier('$' + node.id.name)) || newFunctionName();
-  var isGlobal = node.id.name === '$$__global';
+  // All functions are converted with assignments (foo = function
+  // foo() {}) but with the function name. Rename the function though
+  // so that if it is referenced inside itself, it will close over the
+  // "outside" variable (that should be boxed)
+  node.id = node.id || newFunctionName();
+  var isGlobal = node.id.name === '$__global';
+  var isExpr = node.id.name === '$__eval';
   var nameId = node.id;
   var funcName = node.id.name;
   var contextId = b.identifier('$ctx');
@@ -2145,10 +2256,25 @@ function visitNode(node, scope, debugInfo) {
     })
   );
 
+  // It sucks to traverse the whole function again, but we need to see
+  // if we need to manage a try stack
+  var hasTry = false;
+  types.traverse(node.body, function(child) {
+    if(n.Function.check(child)) {
+      return false;
+    }
+    
+    if(n.TryStatement.check(child)) {
+      hasTry = true;
+    }
+
+    return;
+  });
+
   // Traverse and compile child functions first
   node.body = types.traverse(node.body, function(child) {
-    return visitNode.call(this, 
-                          child, 
+    return visitNode.call(this,
+                          child,
                           scope.concat(localScope),
                           debugInfo);
   });
@@ -2161,12 +2287,6 @@ function visitNode(node, scope, debugInfo) {
 
   var machine = em.getMachine(node.id.name, localScope);
   var finalBody = machine.ast;
-  // types.traverse(machine.ast, function(node) {
-  //   return visitNode.call(this,
-  //                         node,
-  //                         localScope.concat(scope),
-  //                         debugInfo);
-  // });
 
   // construct the thing
 
@@ -2199,6 +2319,7 @@ function visitNode(node, scope, debugInfo) {
                ]);
              })),
              b.thisExpression(),
+             hasTry ? b.identifier('tryStack') : b.literal(null),
              contextId,
              em.contextProperty('childFrame')]
           )
@@ -2212,13 +2333,13 @@ function visitNode(node, scope, debugInfo) {
 
   var inner = [];
 
-  if(!isGlobal) {
+  if(!isGlobal && !isExpr) {
     node.params.forEach(function(arg) {
       if(arg.boxed) {
         inner.push(b.expressionStatement(
           b.assignmentExpression(
             '=',
-            arg, 
+            arg,
             b.arrayExpression([arg])
           )
         ));
@@ -2239,7 +2360,7 @@ function visitNode(node, scope, debugInfo) {
     ])
   );
 
-  if(!isGlobal) {
+  if(!isGlobal && !isExpr) {
     inner.push.apply(inner, [
       b.ifStatement(
         b.binaryExpression('===',
@@ -2265,9 +2386,13 @@ function visitNode(node, scope, debugInfo) {
     ]);
   }
 
+  if(hasTry) {
+    inner.push(em.declareVar('tryStack', b.arrayExpression([])));
+  }
+
   inner = inner.concat([
     b.tryStatement(
-      b.blockStatement([getRestoration(em, isGlobal, localScope)]
+      b.blockStatement([getRestoration(em, isGlobal, localScope, hasTry)]
                        .concat(finalBody)),
       b.catchClause(b.identifier('e'), null, b.blockStatement([
         b.expressionStatement(
@@ -2282,14 +2407,13 @@ function visitNode(node, scope, debugInfo) {
   ]);
   addSnapshot(inner);
 
-  if(isGlobal) {
+  if(isGlobal || isExpr) {
     node.body = b.blockStatement([
       vars ? vars : b.expressionStatement(b.literal(null)),
       b.functionDeclaration(
           nameId, [],
           b.blockStatement(inner)
-      ),
-      b.returnStatement(nameId)
+      )
     ]);
   }
   else {
@@ -2299,7 +2423,7 @@ function visitNode(node, scope, debugInfo) {
   return false;
 }
 
-function getRestoration(self, isGlobal, localScope) {
+function getRestoration(self, isGlobal, localScope, hasTry) {
   // restoring a frame
   var restoration = [];
 
@@ -2308,9 +2432,7 @@ function getRestoration(self, isGlobal, localScope) {
       return b.expressionStatement(
         b.assignmentExpression(
           '=',
-          (id.boxed ?
-           b.memberExpression(id, b.literal(0), true) :
-           b.identifier(id.name)),
+          b.identifier(id.name),
           self.getProperty(
             self.getProperty(self.contextProperty('frame'), 'state'),
             id
@@ -2318,6 +2440,13 @@ function getRestoration(self, isGlobal, localScope) {
         )
       );
     });
+  }
+
+  if(hasTry) {
+    restoration.push(
+      self.assign(b.identifier('tryStack'), 
+                  self.getProperty(self.contextProperty('frame'), 'tryStack'))
+    );
   }
 
   restoration = restoration.concat([
@@ -2375,7 +2504,7 @@ function getRestoration(self, isGlobal, localScope) {
   );
 }
 
-},{"./debug":1,"./emit":2,"./hoist":3,"assert":65,"ast-types":19,"escope":38}],8:[function(require,module,exports){
+},{"./debug":1,"./emit":2,"./hoist":3,"./util":6,"assert":65,"ast-types":19,"escope":38}],8:[function(require,module,exports){
 var __dirname="/";/**
  * Copyright (c) 2013, Facebook, Inc.
  * All rights reserved.
@@ -2458,19 +2587,19 @@ function regenerator(source, options) {
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
   if (options.includeRuntime) {
-    recastAst.program.body = [b.variableDeclaration(
-      'var',
-      [b.variableDeclarator(
-        b.identifier('$__global'),
-        b.callExpression(
-          b.functionExpression(
-            null, [],
-            b.blockStatement(recastAst.program.body)
-          ),
-          []
-        )
-      )]
-    )];
+    // recastAst.program.body = [b.variableDeclaration(
+    //   'var',
+    //   [b.variableDeclarator(
+    //     b.identifier('$__global'),
+    //     b.callExpression(
+    //       b.functionExpression(
+    //         null, [],
+    //         b.blockStatement(recastAst.program.body)
+    //       ),
+    //       []
+    //     )
+    //   )]
+    // )];
 
     var body = recastAst.program.body;
     body.unshift.apply(body, runtimeBody);

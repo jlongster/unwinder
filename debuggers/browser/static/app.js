@@ -39,6 +39,8 @@ var App = React.createClass({
   componentDidUpdate: function(prevProps, prevState) {
     if(prevState.client !== this.state.client) {
       this.state.client.on('breakpoint', function(loc) {
+        console.log('BREAKPOINT', loc);
+
         this.openToolset('debugger');
         this.refs.editor.highlight(loc);
         this.refs.toolset.getTool('debugger').printReport();
@@ -169,7 +171,7 @@ var App = React.createClass({
         var info = mirror.lineInfo(line);
         var markers = info.gutterMarkers;
         if(markers) {
-          debugInfo.setBreakpoint(info.line + 1);
+          debugInfo.toggleBreakpoint(info.line + 1);
         }
       });
 
@@ -346,6 +348,10 @@ var Display = React.createClass({
     this.resize();
   },
 
+  componentDidUpdate: function() {
+    this.resize();
+  },
+
   resize: function() {
     var root = this.getDOMNode();
     var iframe = $(root).find('iframe')[0];
@@ -418,7 +424,8 @@ var Debugger = React.createClass({
   getInitialState: function() {
     return { output: '',
              stack: [],
-             scope: [] };
+             scope: [],
+             runstate: 'idle' };
   },
 
   componentDidUpdate: function(prevProps) {
@@ -471,15 +478,15 @@ var Debugger = React.createClass({
         this.props.client.send({
           type: 'eval',
           args: ['[' + scope.join(',') + ']']
-        }, function(res) {
+        }, function(err, res) {
           this.setState({
-            scope: _.zip(scope, res.result)
+            scope: _.zip(scope, res)
           });
         }.bind(this));
 
         this.setState({
           stack: stack.reduce(function(acc, frame) {
-            if(frame.name != 'top-level') {
+            if(frame.name != '__global') {
               var line = srclines[frame.loc.start.line - 1];
               acc.push(frame.name + ': ' +
                        line.slice(frame.loc.start.column,
@@ -490,6 +497,9 @@ var Debugger = React.createClass({
           }, []),
           runstate: state
         });
+      }
+      else {
+        this.setState(this.getInitialState());
       }
     }.bind(this));
   },
@@ -588,7 +598,7 @@ var Console = React.createClass({
       type: 'eval',
       args: [this.state.input]
     }, function(err, res) {
-      this.log(this.state.input + '\n' + res.result);
+      this.log(this.state.input + '\n' + res);
       this.setState({ input: '' });
       this.props.getDebugger().printReport();
     }.bind(this));

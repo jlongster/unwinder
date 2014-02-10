@@ -13,7 +13,7 @@ function mumble(i) {
   for(var j=0; j<i; j++) {
     z = j;
   }
-  return quux(z);
+  return z;
 }
 
 function baz(i) {
@@ -37,4 +37,4 @@ function foo() {
   return bar(10000);
 }
 
-
+console.log(foo());

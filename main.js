@@ -80,19 +80,19 @@ function regenerator(source, options) {
   // Include the runtime by modifying the AST rather than by concatenating
   // strings. This technique will allow for more accurate source mapping.
   if (options.includeRuntime) {
-    recastAst.program.body = [b.variableDeclaration(
-      'var',
-      [b.variableDeclarator(
-        b.identifier('$__global'),
-        b.callExpression(
-          b.functionExpression(
-            null, [],
-            b.blockStatement(recastAst.program.body)
-          ),
-          []
-        )
-      )]
-    )];
+    // recastAst.program.body = [b.variableDeclaration(
+    //   'var',
+    //   [b.variableDeclarator(
+    //     b.identifier('$__global'),
+    //     b.callExpression(
+    //       b.functionExpression(
+    //         null, [],
+    //         b.blockStatement(recastAst.program.body)
+    //       ),
+    //       []
+    //     )
+    //   )]
+    // )];
 
     var body = recastAst.program.body;
     body.unshift.apply(body, runtimeBody);

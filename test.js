@@ -1,8 +1,11 @@
 
-var x = 0;
-
 function foo() {
-  x++;
+  try {
+    bar();
+  }
+  catch(e) {
+    console.log('hi');
+  }
 }
 
 foo();

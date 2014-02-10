@@ -24,27 +24,31 @@
     this.state = IDLE;
     this._events = {};
     this.stepping = false;
+    this.prevStates = [];
+    this.allocCache();
+    this.tryStack = [];
   }
 
   // 3 ways to execute code:
-  // 
+  //
   // * run: the main entry point. give it a string and it will being the program
   // * execute: runs a function instance. use this to run individual
   //   state machines
   // * evaluate: evalutes a code string in the global scope
 
   Machine.prototype.execute = function(fn, debugInfo, thisPtr, args) {
-    if(this.state === 'SUSPENDED') {
-      return;
-    }
-
+    var prevState = this.state;
     this.state = EXECUTING;
 
     if(debugInfo) {
-      this.setDebugInfo(new DebugInfo(debugInfo));
+      if(!debugInfo.data) {
+        debugInfo = new DebugInfo(debugInfo);
+      }
+      this.setDebugInfo(debugInfo);
     }
 
     var prevStepping = this.stepping;
+    var prevFrame = this.rootFrame;
     this.stepping = false;
 
     var ctx = fn.$ctx = this.getContext();
@@ -56,19 +60,29 @@
       fn();
     }
 
-    this.checkStatus(ctx);
-    this.stepping = prevStepping;
+    // It's a weird case if we run code while we are suspended, but if
+    // so we try to run it and kind of ignore whatever happened (no
+    // breakpoints, etc), but we do fire an error event if it happened
+    if(prevState === 'suspended') {
+      if(this.error) {
+        this.fire('error', this.error);
+        this.error = null;
+      }
+      this.state = prevState;
+    }
+    else {
+      this.rootFrame = null;
+      this.checkStatus(ctx);
+    }
 
-    // clean up the function, since this property is used to tell if
-    // we are inside our VM or not
-    delete fn.$ctx;
+    this.stepping = prevStepping;
 
     return ctx.rval;
   };
 
   Machine.prototype.run = function(code, debugInfo) {
     if(typeof code === 'string') {
-      var fn = new Function('VM', '$Frame', code);
+      var fn = new Function('VM', '$Frame', code + '\nreturn $__global;');
       var rootFn = fn(this, Frame);
     }
     else {
@@ -168,8 +182,29 @@
       return this.lastEval;
     }
 
+    // An expression can be one of these forms:
+    //
+    // 1. foo = function() { <stmt/expr> ... }
+    // 2. function foo() { <stmt/expr> ... }
+    // 3. x = <expr>
+    // 4. var x = <expr>
+    // 5. <stmt/expr>
+    //
+    // 1-4 can change any data in the current frame, and introduce new
+    // variables that are only available for the current session (will
+    // disappear after any stepping/resume/etc). Functions in 1 and 2
+    // will be compiled, so they can be paused and debugged.
+    //
+    // 5 can run any arbitrary expression, TODO: but there might be
+    // implications of running it raw
+
     if(this.rootFrame) {
       var top = this.getTopFrame();
+      expr = compiler(expr, {
+        asExpr: true,
+        scope: top.scope
+      }).code;
+
       var res = top.evaluate(this, expr);
 
       // fix the self-referencing pointer
@@ -184,21 +219,17 @@
         this.rootFrame = res.frame;
       }
 
-      this.rootFrame.name = '<top-level>';
       this.lastEval = res.result;
       return this.lastEval;
     }
     else if(this.globalFn) {
-      // TODO: seek out functions, compile them, and convert them to
-      // assignments
-
-      if(expr.indexOf('function') !== -1) {
-        expr = compiler(expr).code;
-      }
+      expr = compiler(expr, {
+        asExpr: true
+      }).code;
 
       this.evalArg = expr;
       this.stepping = true;
-      
+
       var ctx = this.getContext();
       ctx.softReset();
       ctx.next = -1;
@@ -213,9 +244,15 @@
 
   Machine.prototype.checkStatus = function(ctx) {
     if(ctx.frame) {
+      this.rootFrame = ctx.frame;
+
+      if(this.dispatchException(this.error)) {
+        this.rootFrame = null;
+        return;
+      }
+
       // machine was paused
       this.state = SUSPENDED;
-      this.rootFrame = ctx.frame;
 
       if(this.error) {
         this.fire('error', this.error);
@@ -301,6 +338,16 @@
     return top;
   };
 
+  Machine.prototype.getFrames = function() {
+    var frames = [];
+    var frame = this.rootFrame;
+    while(frame) {
+      frames.push(frame);
+      frame = frame.child;
+    }
+    return frames;
+  };
+
   Machine.prototype.setDebugInfo = function(info) {
     this.debugInfo = info || new DebugInfo([]);
     this.machineBreaks = new Array(this.debugInfo.data.length);
@@ -348,8 +395,8 @@
 
   // cache
 
-  Machine.allocCache = function() {
-    this.cacheSize = 30000;
+  Machine.prototype.allocCache = function() {
+    this.cacheSize = 15000;
     this._contexts = new Array(this.cacheSize);
     this.contextptr = 0;
     for(var i=0; i<this.cacheSize; i++) {
@@ -358,29 +405,115 @@
   };
 
   Machine.prototype.getContext = function() {
+    var ctx;
     if(this.contextptr < this.cacheSize) {
-      return this._contexts[this.contextptr++];
+      ctx = this._contexts[this.contextptr];
     }
     else {
-      return new Context();
+      ctx = new Context();
     }
+
+    this.contextptr++;
+    ctx.softReset();
+    return ctx;
   };
 
   Machine.prototype.releaseContext = function() {
     this.contextptr--;
   };
 
+  Machine.prototype.pushState = function() {
+    this.prevStates.push([
+      this.stepping, this.hasBreakpoints
+    ]);
+
+    this.stepping = false;
+    this.hasBreakpoints = false;
+  };
+
+  Machine.prototype.popState = function() {
+    var state = this.prevStates.pop();
+    this.stepping = state[0];
+    this.hasBreakpoints = state[1];
+  };
+
+  Machine.prototype.pushTry = function(stack, catchLoc, finallyLoc, finallyTempVar) {
+    if(finallyLoc) {
+      stack.push({
+        finallyLoc: finallyLoc,
+        finallyTempVar: finallyTempVar
+      });
+    }
+
+    if(catchLoc) {
+      stack.push({
+        catchLoc: catchLoc
+      });
+    }
+  };
+
+  Machine.prototype.popCatch = function(stack, catchLoc) {
+    var entry = stack[stack.length - 1];
+    if(entry && entry.catchLoc === catchLoc) {
+      stack.pop();
+    }
+  };
+
+  Machine.prototype.popFinally = function(stack, finallyLoc) {
+    var entry = stack[stack.length - 1];
+
+    if(!entry || !entry.finallyLoc) {
+      stack.pop();
+      entry = stack[stack.length - 1];
+    }
+
+    if(entry && entry.finallyLoc === finallyLoc) {
+      stack.pop();
+    }
+  };
+
+  Machine.prototype.dispatchException = function(exc) {
+    var frames = this.getFrames();
+    var dispatched = false;
+    // TODO: don't force this?
+    this.stepping = false;
+
+    for(var i=frames.length - 1; i >= 0; i--) {
+      var frame = frames[i];
+
+      if(frame.dispatchException(exc)) {
+        frame.child = null;
+        frames.length = i + 1;
+        dispatched = true;
+        break;
+      }
+    }
+
+    if(dispatched) {
+      this.error = null;
+      var ctx = this.rootFrame.ctx;
+      this.rootFrame.restore();
+      this.checkStatus(ctx);
+    }
+    
+    return dispatched;
+  };
+
+  Machine.prototype.keys = function(obj) {
+    return Object.keys(obj).reverse();
+  };
 
   // frame
 
   function Frame(machineId, name, fn, state, scope,
-                 thisPtr, ctx, child) {
+                 thisPtr, tryStack, ctx, child) {
     this.machineId = machineId;
     this.name = name;
     this.fn = fn;
     this.state = state;
     this.scope = scope;
     this.thisPtr = thisPtr;
+    this.tryStack = tryStack;
     this.ctx = ctx;
     this.child = child;
   }
@@ -458,7 +591,50 @@
     return machine.debugInfo.data[this.machineId].locs[this.ctx.next];
   };
 
-  // debug info 
+  Frame.prototype.dispatchException = function(exc) {
+    if(!this.tryStack) {
+      return false;
+    }
+
+    var next;
+    var hasCaught = false;
+    var hasFinally = false;
+    var finallyEntries = [];
+
+    for(var i=this.tryStack.length - 1; i >= 0; i--) {
+      var entry = this.tryStack[i];
+      if(entry.catchLoc) {
+        next = entry.catchLoc;
+        hasCaught = true;
+        break;
+      }
+      else if(entry.finallyLoc) {
+        finallyEntries.push(entry);
+        hasFinally = true;
+      }
+    }
+
+    // initially, `next` is undefined which will jump to the end of the
+    // function. (the default case)
+    while((entry = finallyEntries.pop())) {
+      this.ctx[entry.finallyTempVar] = next;
+      next = entry.finallyLoc;
+    }
+    
+    this.ctx.next = next;
+    if(hasCaught) {
+      this.ctx.thrown = exc;
+    }
+
+    if(hasFinally && !hasCaught) {
+      this.child = null;
+      this.restore();
+    }
+
+    return hasCaught;
+  };
+
+  // debug info
 
   function DebugInfo(data) {
     this.data = data;
@@ -512,28 +688,23 @@
   Context.prototype = {
     constructor: Context,
 
-    reset: function(initialState) {
-      this.softReset(initialState);
+    reset: function() {
+      this.softReset();
 
-      // Pre-initialize at least 30 temporary variables to enable hidden
+      // Pre-initialize at least 20 temporary variables to enable hidden
       // class optimizations for simple generators.
       for (var tempIndex = 0, tempName;
-           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 30;
+           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 20;
            ++tempIndex) {
         this[tempName] = null;
       }
     },
 
-    softReset: function(initialState) {
+    softReset: function() {
       this.next = 0;
-      this.lastNext = 0;
       this.sent = void 0;
-      this.returned = void 0;
-      this.state = initialState || EXECUTING;
       this.rval = void 0;
-      this.tryStack = [];
-      this.done = false;
-      this.delegate = null;
+
       this.frame = null;
       this.childFrame = null;
       this.isCompiled = false;
@@ -545,109 +716,32 @@
     stop: function() {
       this.done = true;
 
-      if (hasOwn.call(this, "thrown")) {
-        var thrown = this.thrown;
-        delete this.thrown;
-        throw thrown;
-      }
-
       // if(this.rval === UndefinedValue) {
       //   this.rval = undefined;
       // }
 
-      // return this.rval;
-    },
-
-    keys: function(object) {
-      return Object.keys(object).reverse();
-    },
-
-    pushTry: function(catchLoc, finallyLoc, finallyTempVar) {
-      if (finallyLoc) {
-        this.tryStack.push({
-          finallyLoc: finallyLoc,
-          finallyTempVar: finallyTempVar
-        });
-      }
-
-      if (catchLoc) {
-        this.tryStack.push({
-          catchLoc: catchLoc
-        });
-      }
-    },
-
-    popCatch: function(catchLoc) {
-      var lastIndex = this.tryStack.length - 1;
-      var entry = this.tryStack[lastIndex];
-
-      if (entry && entry.catchLoc === catchLoc) {
-        this.tryStack.length = lastIndex;
-      }
-    },
-
-    popFinally: function(finallyLoc) {
-      var lastIndex = this.tryStack.length - 1;
-      var entry = this.tryStack[lastIndex];
-
-      if (!entry || !hasOwn.call(entry, "finallyLoc")) {
-        entry = this.tryStack[--lastIndex];
-      }
-
-      if (entry && entry.finallyLoc === finallyLoc) {
-        this.tryStack.length = lastIndex;
-      }
-    },
-
-    dispatchException: function(exception) {
-      var finallyEntries = [];
-      var dispatched = false;
-
-      if (this.done) {
-        throw exception;
-      }
-
-      // Dispatch the exception to the "end" location by default.
-      this.thrown = exception;
-      this.next = "end";
-
-      for (var i = this.tryStack.length - 1; i >= 0; --i) {
-        var entry = this.tryStack[i];
-        if (entry.catchLoc) {
-          this.next = entry.catchLoc;
-          dispatched = true;
-          break;
-        } else if (entry.finallyLoc) {
-          finallyEntries.push(entry);
-          dispatched = true;
-        }
-      }
-
-      while ((entry = finallyEntries.pop())) {
-        this[entry.finallyTempVar] = this.next;
-        this.next = entry.finallyLoc;
-      }
-    },
-
-    delegateYield: function(generator, resultName, nextLoc) {
-      var info = generator.next(this.sent);
-
-      if (info.done) {
-        this.delegate = null;
-        this[resultName] = info.value;
-        this.next = nextLoc;
-
-        return ContinueSentinel;
-      }
-
-      this.delegate = {
-        generator: generator,
-        resultName: resultName,
-        nextLoc: nextLoc
-      };
-
-      return info.value;
+      return this.rval;
     }
+
+    // delegateYield: function(generator, resultName, nextLoc) {
+    //   var info = generator.next(this.sent);
+
+    //   if (info.done) {
+    //     this.delegate = null;
+    //     this[resultName] = info.value;
+    //     this.next = nextLoc;
+
+    //     return ContinueSentinel;
+    //   }
+
+    //   this.delegate = {
+    //     generator: generator,
+    //     resultName: resultName,
+    //     nextLoc: nextLoc
+    //   };
+
+    //   return info.value;
+    // }
   };
 
   // exports
