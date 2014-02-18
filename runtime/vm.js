@@ -5,7 +5,9 @@
   // since eval is used, need access to the compiler
 
   if(typeof module !== 'undefined') {
-    var compiler = require('../main.js');
+    var _localpath = __dirname + '/main.js';
+    var _main = require('fs').existsSync(_localpath) ? _localpath : '../main.js';
+    var compiler = require(_main);
   }
   else {
     var compiler = main.js;
@@ -19,13 +21,15 @@
 
   function Machine() {
     this.debugInfo = null;
-    this.rootFrame = null;
-    this.lastEval = null;
+    this.stack = null;
+    this.error = undefined;
+    this.doRestore = false;
+    this.evalResult = null;
     this.state = IDLE;
+    this.running = false;
     this._events = {};
     this.stepping = false;
     this.prevStates = [];
-    this.allocCache();
     this.tryStack = [];
   }
 
@@ -39,6 +43,7 @@
   Machine.prototype.execute = function(fn, debugInfo, thisPtr, args) {
     var prevState = this.state;
     this.state = EXECUTING;
+    this.running = true;
 
     if(debugInfo) {
       if(!debugInfo.data) {
@@ -50,15 +55,22 @@
     var prevStepping = this.stepping;
     var prevFrame = this.rootFrame;
     this.stepping = false;
+    var ret;
 
-    var ctx = fn.$ctx = this.getContext();
-    ctx.softReset();
-    if(thisPtr || args) {
-      fn.apply(thisPtr, args || []);
+    try {
+      if(thisPtr || args) {
+        ret = fn.apply(thisPtr, args || []);
+      }
+      else {
+        ret = fn();
+      }
     }
-    else {
-      fn();
+    catch(e) {
+      this.stack = e.fnstack;
+      this.error = e.error;
     }
+
+    this.stepping = prevStepping;
 
     // It's a weird case if we run code while we are suspended, but if
     // so we try to run it and kind of ignore whatever happened (no
@@ -66,18 +78,14 @@
     if(prevState === 'suspended') {
       if(this.error) {
         this.fire('error', this.error);
-        this.error = null;
       }
       this.state = prevState;
     }
     else {
-      this.rootFrame = null;
-      this.checkStatus(ctx);
+      this.checkStatus();
     }
 
-    this.stepping = prevStepping;
-
-    return ctx.rval;
+    return ret;
   };
 
   Machine.prototype.run = function(code, debugInfo) {
@@ -94,46 +102,53 @@
   };
 
   Machine.prototype.continue = function() {
-    if(this.rootFrame && this.state === SUSPENDED) {
+    if(this.state === SUSPENDED) {
+      var root = this.getRootFrame();
       var top = this.getTopFrame();
-      if(!top.ctx.staticBreakpoint) {
+
+      if(this.machineBreaks[top.machineId][top.next]) {
         // We need to get past this instruction that has a breakpoint, so
         // turn off breakpoints and step past it, then turn them back on
         // again and execute normally
         this.stepping = true;
         this.hasBreakpoints = false;
-        this.rootFrame.restore();
+        this.restore();
+        // TODO: don't force this back on always
+        this.hasBreakpoints = true;
+
+        if(this.error) {
+          return;
+        }
       }
 
-      var nextFrame = this.rootFrame.ctx.frame;
-      this.hasBreakpoints = true;
       this.stepping = false;
-      nextFrame.restore();
-      this.rootFrame = null;
-      this.checkStatus(nextFrame.ctx);
+      this.state = EXECUTING;
+      this.running = true;
+      this.restore();
     }
   };
 
   Machine.prototype.step = function() {
-    if(!this.rootFrame) return;
+    if(!this.stack) return;
 
+    this.running = true;
     this.stepping = true;
     this.hasBreakpoints = false;
-    this.rootFrame.restore();
+    this.restore();
     this.hasBreakpoints = true;
 
-    this.checkStatus(this.rootFrame.ctx);
-
     // rootFrame now points to the new stack
-    var top = this.getTopFrame(this.rootFrame);
+    var top = this.getTopFrame();
 
     if(this.state === SUSPENDED &&
-       top.ctx.next === this.debugInfo.data[top.machineId].finalLoc) {
+       top.next === this.debugInfo.data[top.machineId].finalLoc) {
       // if it's waiting to simply return a value, go ahead and run
       // that step so the user doesn't have to step through each frame
       // return
       this.step();
     }
+
+    this.running = false;
   };
 
   Machine.prototype.stepOver = function() {
@@ -179,7 +194,7 @@
 
   Machine.prototype.evaluate = function(expr) {
     if(expr === '$_') {
-      return this.lastEval;
+      return this.evalResult;
     }
 
     // An expression can be one of these forms:
@@ -195,32 +210,22 @@
     // disappear after any stepping/resume/etc). Functions in 1 and 2
     // will be compiled, so they can be paused and debugged.
     //
-    // 5 can run any arbitrary expression, TODO: but there might be
-    // implications of running it raw
+    // 5 can run any arbitrary expression
 
-    if(this.rootFrame) {
+    if(this.stack) {
       var top = this.getTopFrame();
       expr = compiler(expr, {
         asExpr: true,
         scope: top.scope
       }).code;
 
+      this.running = true;
+      this.doRestore = true;
+      this.stepping = false;
       var res = top.evaluate(this, expr);
-
-      // fix the self-referencing pointer
-      res.frame.ctx.frame = res.frame;
-
-      // switch frames to get any updated data
-      var parent = this.getFrameOffset(1);
-      if(parent) {
-        parent.child = res.frame;
-      }
-      else {
-        this.rootFrame = res.frame;
-      }
-
-      this.lastEval = res.result;
-      return this.lastEval;
+      this.stepping = true;
+      this.doRestore = false;
+      this.running = false;
     }
     else if(this.globalFn) {
       expr = compiler(expr, {
@@ -230,44 +235,63 @@
       this.evalArg = expr;
       this.stepping = true;
 
-      var ctx = this.getContext();
-      ctx.softReset();
-      ctx.next = -1;
-      ctx.frame = true;
-
-      this.globalFn.$ctx = ctx;
-      (0, this).globalFn();
-
-      return ctx.rval;
+      this.withTopFrame({
+        next: -1, 
+        state: {}
+      }, function() {
+        this.doRestore = true;
+        try {
+          (0, this).globalFn();
+        }
+        catch(e) {
+          if(e.error) {
+            throw e.error;
+          }
+        }
+        this.doRestore = false;
+      }.bind(this));
     }
+    else {
+      throw new Error('invalid evaluation state');
+    }
+
+    return this.evalResult;
   };
 
-  Machine.prototype.checkStatus = function(ctx) {
-    if(ctx.frame) {
-      this.rootFrame = ctx.frame;
+  Machine.prototype.restore = function() {
+    try {
+      this.doRestore = true;
+      this.getRootFrame().restore();
+      this.error = undefined;
+    }
+    catch(e) {
+      this.stack = e.fnstack;
+      this.error = e.error;
+    }
+    this.checkStatus();
+  };
 
-      if(this.dispatchException(this.error)) {
-        this.rootFrame = null;
-        return;
-      }
-
-      // machine was paused
-      this.state = SUSPENDED;
-
+  Machine.prototype.checkStatus = function() {
+    if(this.stack) {
       if(this.error) {
+        if(this.dispatchException()) {
+          return;
+        }
+
         this.fire('error', this.error);
-        this.error = null;
       }
       else {
         this.fire('breakpoint');
       }
 
-      this.stepping = true;
+      this.state = SUSPENDED;
     }
     else {
       this.fire('finish');
       this.state = IDLE;
     }
+
+    this.running = false;
   };
 
   Machine.prototype.on = function(event, handler) {
@@ -300,17 +324,11 @@
   };
 
   Machine.prototype.getTopFrame = function() {
-    if(!this.rootFrame) return null;
-
-    var top = this.rootFrame;
-    while(top.child) {
-      top = top.child;
-    }
-    return top;
+    return this.stack && this.stack[0];
   };
 
   Machine.prototype.getRootFrame = function() {
-    return this.rootFrame;
+    return this.stack && this.stack[this.stack.length - 1];
   };
 
   Machine.prototype.getFrameOffset = function(i) {
@@ -336,16 +354,6 @@
     }
 
     return top;
-  };
-
-  Machine.prototype.getFrames = function() {
-    var frames = [];
-    var frame = this.rootFrame;
-    while(frame) {
-      frames.push(frame);
-      frame = frame.child;
-    }
-    return frames;
   };
 
   Machine.prototype.setDebugInfo = function(info) {
@@ -379,10 +387,10 @@
   };
 
   Machine.prototype.getLocation = function() {
-    if(!this.rootFrame || !this.debugInfo) return;
+    if(!this.stack || !this.debugInfo) return;
 
     var top = this.getTopFrame();
-    return this.debugInfo.data[top.machineId].locs[top.ctx.next];
+    return this.debugInfo.data[top.machineId].locs[top.next];
   };
 
   Machine.prototype.disableBreakpoints = function() {
@@ -391,35 +399,6 @@
 
   Machine.prototype.enableBreakpoints = function() {
     this.hasBreakpoints = true;
-  };
-
-  // cache
-
-  Machine.prototype.allocCache = function() {
-    this.cacheSize = 15000;
-    this._contexts = new Array(this.cacheSize);
-    this.contextptr = 0;
-    for(var i=0; i<this.cacheSize; i++) {
-      this._contexts[i] = new Context();
-    }
-  };
-
-  Machine.prototype.getContext = function() {
-    var ctx;
-    if(this.contextptr < this.cacheSize) {
-      ctx = this._contexts[this.contextptr];
-    }
-    else {
-      ctx = new Context();
-    }
-
-    this.contextptr++;
-    ctx.softReset();
-    return ctx;
-  };
-
-  Machine.prototype.releaseContext = function() {
-    this.contextptr--;
   };
 
   Machine.prototype.pushState = function() {
@@ -472,30 +451,35 @@
     }
   };
 
-  Machine.prototype.dispatchException = function(exc) {
-    var frames = this.getFrames();
+  Machine.prototype.dispatchException = function() {
+    if(this.error == null) {
+      return false;
+    }
+
+    var exc = this.error;
     var dispatched = false;
-    // TODO: don't force this?
+    var prevStepping = this.stepping;
     this.stepping = false;
 
-    for(var i=frames.length - 1; i >= 0; i--) {
-      var frame = frames[i];
+    for(var i=0; i<this.stack.length; i++) {
+      var frame = this.stack[i];
 
-      if(frame.dispatchException(exc)) {
-        frame.child = null;
-        frames.length = i + 1;
+      if(frame.dispatchException(this, exc)) {
+        // shave off the frames were walked over
+        this.stack = this.stack.slice(i);
         dispatched = true;
         break;
       }
     }
 
-    if(dispatched) {
-      this.error = null;
-      var ctx = this.rootFrame.ctx;
-      this.rootFrame.restore();
-      this.checkStatus(ctx);
+    if(!prevStepping && dispatched) {
+      this.restore();
     }
     
+    if(dispatched) {
+      this.error = undefined;
+    }
+
     return dispatched;
   };
 
@@ -503,60 +487,85 @@
     return Object.keys(obj).reverse();
   };
 
+  Machine.prototype.popFrame = function() {
+    var r = this.stack.pop();
+    if(!this.stack.length) {
+      this.doRestore = false;
+      this.stack = null;
+    }
+    return r;
+  };
+
+  Machine.prototype.nextFrame = function() {
+    if(this.stack && this.stack.length) {
+      return this.stack[this.stack.length - 1];
+    }
+    return null;
+  };
+
+  Machine.prototype.withTopFrame = function(frame, fn) {
+    var prev = this.stack;
+    this.stack = [frame];
+    try {
+      var newFrame;
+      if((newFrame = fn())) {
+        // replace the top of the real stack with the new frame
+        prev[0] = newFrame;
+      }
+    }
+    finally {
+      this.stack = prev;
+    }
+  };
+
   // frame
 
-  function Frame(machineId, name, fn, state, scope,
-                 thisPtr, tryStack, ctx, child) {
+  function Frame(machineId, name, fn, next, state, scope,
+                 thisPtr, tryStack, tmpid) {
     this.machineId = machineId;
     this.name = name;
     this.fn = fn;
+    this.next = next;
     this.state = state;
     this.scope = scope;
     this.thisPtr = thisPtr;
     this.tryStack = tryStack;
-    this.ctx = ctx;
-    this.child = child;
+    this.tmpid = tmpid;
   }
 
   Frame.prototype.restore = function() {
-    this.fn.$ctx = this.ctx;
     this.fn.call(this.thisPtr);
   };
 
   Frame.prototype.evaluate = function(machine, expr) {
     machine.evalArg = expr;
-    machine.error = null;
+    machine.error = undefined;
     machine.stepping = true;
 
-    // Convert this frame into a childless frame that will just
-    // execute the eval instruction
-    var savedChild = this.child;
-    var ctx = new Context();
-    ctx.next = -1;
-    ctx.frame = this;
-    this.child = null;
+    machine.withTopFrame(this, function() {
+      var prevNext = this.next;
+      this.next = -1;
 
-    this.fn.$ctx = ctx;
-    this.fn.call(this.thisPtr);
+      try {
+        this.fn.call(this.thisPtr);
+      }
+      catch(e) {
+        if(!(e instanceof $ContinuationExc)) {
+          throw e;
+        }
+        else if(e.error) {
+          throw e.error;
+        }
 
-    // Restore the stack
-    this.child = savedChild;
+        var newFrame = e.fnstack[0];
+        newFrame.next = prevNext;
+        return newFrame;
+      }
 
-    if(machine.error) {
-      var err = machine.error;
-      machine.error = null;
-      throw err;
-    }
-    else {
-      var newFrame = ctx.frame;
-      newFrame.child = this.child;
-      newFrame.ctx = this.ctx;
+      throw new Error('eval did not get a frame back');
+    }.bind(this));
 
-      return {
-        result: ctx.rval,
-        frame: newFrame
-      };
-    }
+    return machine.evalResult;
   };
 
   Frame.prototype.stackEach = function(func) {
@@ -588,10 +597,10 @@
   };
 
   Frame.prototype.getLocation = function(machine) {
-    return machine.debugInfo.data[this.machineId].locs[this.ctx.next];
+    return machine.debugInfo.data[this.machineId].locs[this.next];
   };
 
-  Frame.prototype.dispatchException = function(exc) {
+  Frame.prototype.dispatchException = function(machine, exc) {
     if(!this.tryStack) {
       return false;
     }
@@ -617,18 +626,17 @@
     // initially, `next` is undefined which will jump to the end of the
     // function. (the default case)
     while((entry = finallyEntries.pop())) {
-      this.ctx[entry.finallyTempVar] = next;
+      this.state['$__t' + entry.finallyTempVar] = next;
       next = entry.finallyLoc;
     }
     
-    this.ctx.next = next;
-    if(hasCaught) {
-      this.ctx.thrown = exc;
-    }
+    this.next = next;
 
     if(hasFinally && !hasCaught) {
-      this.child = null;
-      this.restore();
+      machine.withTopFrame(this, function() {
+        machine.doRestore = true;
+        this.restore();
+      }.bind(this));
     }
 
     return hasCaught;
@@ -679,69 +687,14 @@
     }
   };
 
-  // context
-
-  function Context() {
-    this.reset();
+  function ContinuationExc(error, initialFrame) {
+    this.fnstack = initialFrame ? [initialFrame] : [];
+    this.error = error;
+    this.reuse = !!initialFrame;
   }
 
-  Context.prototype = {
-    constructor: Context,
-
-    reset: function() {
-      this.softReset();
-
-      // Pre-initialize at least 20 temporary variables to enable hidden
-      // class optimizations for simple generators.
-      for (var tempIndex = 0, tempName;
-           hasOwn.call(this, tempName = "t" + tempIndex) || tempIndex < 20;
-           ++tempIndex) {
-        this[tempName] = null;
-      }
-    },
-
-    softReset: function() {
-      this.next = 0;
-      this.sent = void 0;
-      this.rval = void 0;
-
-      this.frame = null;
-      this.childFrame = null;
-      this.isCompiled = false;
-
-      this.staticBreakpoint = false;
-      this.stepping = false;
-    },
-
-    stop: function() {
-      this.done = true;
-
-      // if(this.rval === UndefinedValue) {
-      //   this.rval = undefined;
-      // }
-
-      return this.rval;
-    }
-
-    // delegateYield: function(generator, resultName, nextLoc) {
-    //   var info = generator.next(this.sent);
-
-    //   if (info.done) {
-    //     this.delegate = null;
-    //     this[resultName] = info.value;
-    //     this.next = nextLoc;
-
-    //     return ContinueSentinel;
-    //   }
-
-    //   this.delegate = {
-    //     generator: generator,
-    //     resultName: resultName,
-    //     nextLoc: nextLoc
-    //   };
-
-    //   return info.value;
-    // }
+  ContinuationExc.prototype.pushFrame = function(frame) {
+    this.fnstack.push(frame);
   };
 
   // exports
@@ -749,6 +702,7 @@
   global.$Machine = Machine;
   global.$Frame = Frame;
   global.$DebugInfo = DebugInfo;
+  global.$ContinuationExc = ContinuationExc;
   if(typeof exports !== 'undefined') {
     exports.$Machine = Machine;
     exports.$Frame = Frame;

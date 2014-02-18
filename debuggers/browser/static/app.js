@@ -39,8 +39,6 @@ var App = React.createClass({
   componentDidUpdate: function(prevProps, prevState) {
     if(prevState.client !== this.state.client) {
       this.state.client.on('breakpoint', function(loc) {
-        console.log('BREAKPOINT', loc);
-
         this.openToolset('debugger');
         this.refs.editor.highlight(loc);
         this.refs.toolset.getTool('debugger').printReport();
@@ -138,9 +136,13 @@ var App = React.createClass({
     var src = editor.getValue();
     consoleTool.clear();
 
-    var output = this.compile(src, {
-      asRoot: true
-    });
+    var output = this.compile(src);
+
+    // external scripts
+    var resources = this.refs.toolset.getTool('resources');
+    var scripts = resources.state.urls.map(function(url) {
+      return '<script src="' + url + '"></script>';
+    }).join('');
 
     var debugInfo = new $DebugInfo(output.debugInfo);
     var display = this.refs.display.getDOMNode();
@@ -158,6 +160,8 @@ var App = React.createClass({
       '<script>var VM = new $Machine();</script>' +
       '<script src="/conn.js"></script>' +
       '<script src="/app-conn.js"></script>' +
+      scripts +
+      // '<script src="/src.js"></script>' +
       '</body></html>';
 
     if(client) {
@@ -196,10 +200,6 @@ var App = React.createClass({
     this.setState({ toolsetOpen: false });
   },
 
-  clear: function() {
-    window.location.href = window.location.href;
-  },
-
   getMachine: function() {
     return this.state.machine;
   },
@@ -209,18 +209,23 @@ var App = React.createClass({
       { className: 'app' },
       dom.div(
         { className: 'app-inner' },
-        Editor({
-          ref: 'editor',
-          className: ('col col-sm-6 left ' +
-                      (this.state.toolsetOpen ? 'partial' : 'full')),
-          value: this.state.source,
-          client: this.state.client,
-          onChange: this.handleSourceChange,
-          onToggleBreakpoint: this.handleBreakpoint
-        }),
+        dom.div(
+          { className: 'editor-wrapper' },
+          Editor({
+            ref: 'editor',
+            className: (this.state.toolsetOpen ? 'partial' : 'full'),
+            value: this.state.source,
+            client: this.state.client,
+            onChange: this.handleSourceChange,
+            onToggleBreakpoint: this.handleBreakpoint
+          }),
+          Footer({ onRun: this.run,
+                   onRunExpression: this.runExpression,
+                   toolsetOpen: this.state.toolsetOpen,
+                   onToggleToolset: this.toggleToolset })
+        ),
         Display({ ref: 'display',
-                  className: ('col col-sm-6 right ' +
-                              (this.state.toolsetOpen ? 'partial' : 'full')),
+                  className: (this.state.toolsetOpen ? 'partial' : 'full'),
                   value: this.state.displayValue }),
         Toolset({ className: this.state.toolsetOpen ? '' : 'hidden',
                   ref: 'toolset',
@@ -229,12 +234,7 @@ var App = React.createClass({
                   getEditor: function() {
                     return this.refs.editor;
                   }.bind(this) })
-      ),
-      Footer({ onRun: this.run,
-               onRunExpression: this.runExpression,
-               toolsetOpen: this.state.toolsetOpen,
-               onClear: this.clear,
-               onToggleToolset: this.toggleToolset })
+      )
     );
   }
 });
@@ -387,7 +387,7 @@ var Toolset = React.createClass({
     var cls = ['toolset', this.props.className || ''].join(' ');
 
     var activeClass = function(tool, cls) {
-      return this.state.openTool == tool ? cls : null;
+      return this.state.openTool === tool ? cls : null;
     }.bind(this);
 
     return dom.div(
@@ -401,21 +401,24 @@ var Toolset = React.createClass({
                      "DEBOOGER")),
         dom.li({ className: activeClass('console', 'active') },
                dom.a({ onClick: this.tool.bind(this, 'console') },
-                     "CONSOLE"))
+                     "CONSOLE")),
+        dom.li({ className: activeClass('resources', 'active') },
+               dom.a({ onClick: this.tool.bind(this, 'resources') },
+                     "RESOURCES"))
       ),
       Debugger({ ref: 'debugger',
-                 className: classes('debugger', activeClass('debugger', 'show')),
+                 className: activeClass('debugger', 'show'),
                  onClose: this.closeTool,
                  client: this.props.client,
                  getConsole: this.getTool.bind(this, 'console'),
                  getEditor: this.props.getEditor }),
       Console({ ref: 'console',
-                className: classes('console',
-                                   activeClass('console', 'show'),
-                                   activeClass('debugger', 'show with-debugger')),
+                className: activeClass('console', 'show'),
                 client: this.props.client,
                 getDebugger: this.getTool.bind(this, 'debugger'),
-                onClose: this.closeTool })
+                onClose: this.closeTool }),
+      Resources({ ref: 'resources',
+                  className: activeClass('resources', 'show') })
     );
   }
 });
@@ -474,6 +477,7 @@ var Debugger = React.createClass({
     }, function(state, stack, scope) {
       if(state !== 'idle') {
         var srclines = this.props.getEditor().getValue().split('\n');
+        scope = _.unique(scope);
 
         this.props.client.send({
           type: 'eval',
@@ -621,6 +625,69 @@ var Console = React.createClass({
   }
 });
 
+var Resources = React.createClass({
+  getInitialState: function() {
+    return {
+      urls: [
+        'http://jlongster.com/s/cloth/gl-matrix.js',
+        'http://jlongster.com/s/cloth/renderers.js'
+      ]
+    };
+  },
+
+  handleInput: function(e) {
+    this.setState({ inputUrl: e.target.value });
+  },
+
+  add: function(e) {
+    e.preventDefault();
+    this.setState({
+      urls: this.state.urls.concat([this.state.inputUrl]),
+      inputUrl: ''
+    });
+  },
+
+  remove: function(e, i) {
+    e.preventDefault();
+    var urls = this.state.urls.slice();
+    urls.splice(i, 1);
+
+    this.setState({
+      urls: urls,
+      inputUrl: ''
+    });
+  },
+
+  render: function() {
+    var cls = ['tool resources', this.props.className || ''].join(' ');
+    return dom.div(
+      { className: cls },
+      dom.ul(
+        null,
+        this.state.urls.map(function(url, i) {
+          return dom.li(
+            null,
+            dom.div(
+              null,
+              url,
+              dom.a({ href: '#',
+                      onClick: function(e) {
+                        this.remove(e, i);
+                      }.bind(this) },
+                    'x')
+            )
+          );
+        }.bind(this))
+      ),
+      dom.form(
+        { onSubmit: this.add },
+        dom.input({ onChange: this.handleInput,
+                    value: this.state.inputUrl })
+      )
+    );
+  }
+});
+
 var Footer = React.createClass({
   render: function() {
     var cls = ['footer', this.props.className || ''].join(' ');
@@ -631,9 +698,6 @@ var Footer = React.createClass({
                    dom.button({ className: 'btn btn-success',
                                 onClick: this.props.onRunExpression },
                               "RUN EXPRESSION"),
-                   dom.button({ className: 'btn btn-success',
-                                onClick: this.props.onClear },
-                              "CLEAR"),
                    dom.button({ className: 'btn btn-success',
                                 onClick: this.props.onToggleToolset },
                               (this.props.toolsetOpen ?

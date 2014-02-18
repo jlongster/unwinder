@@ -124,17 +124,13 @@ var meta = require("./meta");
 var hasOwn = Object.prototype.hasOwnProperty;
 var withLoc = require("./util").withLoc;
 
-function Emitter(contextId, debugId, debugInfo) {
+function Emitter(debugId, debugInfo) {
   assert.ok(this instanceof Emitter);
-  n.Identifier.assert(contextId);
+
+  this.tmpId = 0;
+  this.maxTmpId = 0;
 
   Object.defineProperties(this, {
-    // In order to make sure the context object does not collide with
-    // anything in the local scope, we might have to rename it, so we
-    // refer to it symbolically instead of just assuming that it will be
-    // called "context".
-    contextId: { value: contextId },
-
     // An append-only list of Statements that grows each time this.emit is
     // called.
     listing: { value: [] },
@@ -191,9 +187,17 @@ Ep.mark = function(loc) {
   return loc;
 };
 
+Ep.getLastMark = function() {
+  var index = this.listing.length;
+  while(index > 0 && !this.marked[index]) {
+    index--;
+  }
+  return index;
+};
+
 Ep.markAndBreak = function() {
   var next = loc();
-  this.emitAssign(this.contextProperty("next"), next);
+  this.emitAssign(b.identifier('$__next'), next);
   this.emit(b.breakStatement(null), true);
   this.mark(next);
 };
@@ -233,18 +237,6 @@ Ep.assign = function(lhs, rhs, loc) {
   return node;
 };
 
-// Convenience function for generating expressions like context.next,
-// context.sent, and context.rval.
-Ep.contextProperty = function(name, loc) {
-  var node = b.memberExpression(
-    this.contextId,
-    b.identifier(name),
-    false
-  );
-  node.loc = loc;
-  return node;
-};
-
 Ep.declareVar = function(name, init, loc) {
   return withLoc(b.variableDeclaration(
     'var',
@@ -270,64 +262,11 @@ Ep.vmProperty = function(name, loc) {
   return node;
 };
 
-var volatileContextPropertyNames = {
-  next: true,
-  sent: true,
-  rval: true,
-  thrown: true
-};
+Ep.clearPendingException = function(assignee, loc) {
+  var cp = this.vmProperty("error");
 
-// A "volatile" context property is a MemberExpression like context.sent
-// that should probably be stored in a temporary variable when there's a
-// possibility the property will get overwritten.
-Ep.isVolatileContextProperty = function(expr) {
-  if (n.MemberExpression.check(expr)) {
-    if (expr.computed) {
-      // If it's a computed property such as context[couldBeAnything],
-      // assume the worst in terms of volatility.
-      return true;
-    }
-
-    if (n.Identifier.check(expr.object) &&
-        n.Identifier.check(expr.property) &&
-        expr.object.name === this.contextId.name &&
-        hasOwn.call(volatileContextPropertyNames,
-                    expr.property.name)) {
-      return true;
-    }
-  }
-
-  return false;
-};
-
-// Shorthand for setting context.rval and jumping to `context.stop()`.
-Ep.stop = function(rval) {
-  if (rval) {
-    this.setReturnValue(rval);
-  }
-
-  this.jump(this.finalLoc);
-};
-
-Ep.setReturnValue = function(valuePath, loc) {
-  n.Expression.assert(valuePath.value);
-
-  if(!loc) {
-    throw new Error("source location missing");
-  }
-
-  this.emitAssign(
-    this.contextProperty("rval"),
-    this.explodeExpression(valuePath),
-    loc
-  );
-};
-
-Ep.clearPendingException = function(assignee) {
-  var cp = this.contextProperty("thrown");
-
-  if (assignee) {
-    this.emitAssign(assignee, cp);
+  if(assignee) {
+    this.emitAssign(assignee, cp, loc);
   }
 
   this.emitAssign(cp, b.literal(null));
@@ -336,7 +275,7 @@ Ep.clearPendingException = function(assignee) {
 // Emits code for an unconditional jump to the given location, even if the
 // exact value of the location is not yet known.
 Ep.jump = function(toLoc) {
-  this.emitAssign(this.contextProperty("next"), toLoc);
+  this.emitAssign(b.identifier('$__next'), toLoc);
   this.emit(b.breakStatement(), true);
 };
 
@@ -348,7 +287,7 @@ Ep.jumpIf = function(test, toLoc, srcLoc) {
   this.emit(withLoc(b.ifStatement(
     test,
     b.blockStatement([
-      this.assign(this.contextProperty("next"), toLoc),
+      this.assign(b.identifier('$__next'), toLoc),
       b.breakStatement()
     ])
   ), srcLoc));
@@ -362,31 +301,43 @@ Ep.jumpIfNot = function(test, toLoc, srcLoc) {
   this.emit(withLoc(b.ifStatement(
     b.unaryExpression("!", test),
     b.blockStatement([
-      this.assign(this.contextProperty("next"), toLoc),
+      this.assign(b.identifier('$__next'), toLoc),
       b.breakStatement()
     ])
   ), srcLoc));
 };
 
-// Returns a unique MemberExpression that can be used to store and
-// retrieve temporary values. Since the object of the member expression is
-// the context object, which is presumed to coexist peacefully with all
-// other local variables, and since we just increment `nextTempId`
-// monotonically, uniqueness is assured.
-var nextTempId = 0;
-Ep.makeTempVar = function() {
-  return this.contextProperty("t" + nextTempId++);
+// Make temporary ids. They should be released when not needed anymore
+// so that we can generate as few of them as possible.
+Ep.getTempVar = function() {
+  this.tmpId++;
+  if(this.tmpId > this.maxTmpId) {
+    this.maxTmpId = this.tmpId;
+  }
+  return b.identifier("$__t" + this.tmpId);
 };
 
-Ep.makeTempId = function() {
-    return b.identifier("$t" + nextTempId++)
+Ep.currentTempId = function() {
+  return this.tmpId;
+};
+
+Ep.releaseTempVar = function() {
+  this.tmpId--;
+};
+
+Ep.numTempVars = function() {
+  return this.maxTmpId;
+};
+
+Ep.withTempVars = function(cb) {
+  var prevId = this.tmpId;
+  var res = cb();
+  this.tmpId = prevId;
+  return res;
 };
 
 Ep.getMachine = function(funcName, varNames) {
-  return {
-    contextId: this.contextId.name,
-    ast: this.getDispatchLoop(funcName, varNames)
-  };
+  return this.getDispatchLoop(funcName, varNames);
 };
 
 Ep.resolveEmptyJumps = function() {
@@ -402,7 +353,7 @@ Ep.resolveEmptyJumps = function() {
        n.AssignmentExpression.check(stmt.expression) &&
        n.MemberExpression.check(stmt.expression.left) &&
        stmt.expression.left.object.name == '$ctx' &&
-       stmt.expression.left.property.name == 'next') {
+       stmt.expression.left.property.name == '$__next') {
 
       forwards[i] = stmt.expression.right;
       // TODO: actually remove these cases from the output
@@ -460,38 +411,25 @@ Ep.getDispatchLoop = function(funcName, varNames) {
   this.finalLoc.value = this.listing.length;
   this.debugInfo.addFinalLocation(this.debugId, this.finalLoc.value);
 
-  if(funcName === '$__root') {
-    // If global scope, simply fall through and return a frame object
-    cases.push(b.switchCase(null, [
-      self.assign(self.vmProperty('stepping'), b.literal(true)),
-      b.breakStatement()
-    ]));
-  }
-  else {
-    cases.push.apply(cases, [
-      b.switchCase(null, []),
-      b.switchCase(this.finalLoc, [
-        // Clean up the function
-        self.assign(self.getProperty(funcName, '$ctx'),
-                    b.identifier('undefined')),
-
-        // This will check/clear both context.thrown and context.rval.
-        b.returnStatement(
-          b.callExpression(this.contextProperty("stop"), [])
-        )
-      ])
-    ]);
-  }
+  cases.push.apply(cases, [
+    b.switchCase(null, []),
+    b.switchCase(this.finalLoc, [
+      b.returnStatement(null)
+    ])
+  ]);
 
   // add an "eval" location
   cases.push(
     b.switchCase(b.literal(-1), [
       self.assign(
-        self.contextProperty('rval'),
+        self.vmProperty('evalResult'),
         b.callExpression(
           b.identifier('eval'),
           [self.vmProperty('evalArg')]
         )
+      ),
+      b.throwStatement(
+        b.newExpression(b.identifier('$ContinuationExc'), [])
       )
     ])
   );
@@ -511,21 +449,25 @@ Ep.getDispatchLoop = function(funcName, varNames) {
                 self.getProperty(self.vmProperty('machineBreaks'),
                                  b.literal(this.debugId),
                                  true),
-                self.contextProperty('next'),
+                b.identifier('$__next'),
                 true
               ),
               // is identifier right here? it doesn't seem right
               b.identifier('undefined')
             )
           ),
-          b.breakStatement()
+          b.throwStatement(
+            b.newExpression(b.identifier('$ContinuationExc'), [])
+          )
         ),
 
-        b.switchStatement(self.contextProperty('next'), cases),
+        b.switchStatement(b.identifier('$__next'), cases),
 
         b.ifStatement(
           self.vmProperty('stepping'),
-          b.breakStatement()
+          b.throwStatement(
+            b.newExpression(b.identifier('$ContinuationExc'), [])
+          )
         )
       ])
     )
@@ -672,7 +614,7 @@ Ep.explodeStatement = function(path, labelId) {
     self.jumpIf(self.explodeExpression(path.get("test")),
                 first,
                 path.get("test").node.loc);
-    self.emitAssign(self.contextProperty('next'), after);
+    self.emitAssign(b.identifier('$__next'), after);
     self.emit(b.breakStatement(), true);
     self.mark(after);
 
@@ -726,13 +668,8 @@ Ep.explodeStatement = function(path, labelId) {
     var head = loc();
     var after = loc();
 
-    // var keysPath = new types.NodePath(b.callExpression(
-    //   self.contextProperty("keys"),
-    //   [stmt.right]
-    // ), path, "right");
-
     var keys = self.emitAssign(
-      self.makeTempVar(),
+      self.getTempVar(),
       b.callExpression(
         self.vmProperty("keys"),
         [self.explodeExpression(path.get("right"))]
@@ -778,6 +715,7 @@ Ep.explodeStatement = function(path, labelId) {
     self.jump(head);
 
     self.mark(after);
+    self.releaseTempVar();
 
     break;
 
@@ -793,7 +731,7 @@ Ep.explodeStatement = function(path, labelId) {
     // Always save the discriminant into a temporary variable in case the
     // test expressions overwrite values like context.sent.
     var disc = self.emitAssign(
-      self.makeTempVar(),
+      self.getTempVar(),
       self.explodeExpression(path.get("discriminant"))
     );
 
@@ -841,6 +779,7 @@ Ep.explodeStatement = function(path, labelId) {
       }
     );
 
+    self.releaseTempVar();
     self.mark(after);
     if (defaultLoc.value === -1) {
       self.mark(defaultLoc);
@@ -874,7 +813,8 @@ Ep.explodeStatement = function(path, labelId) {
     break;
 
   case "ReturnStatement":
-    self.leapManager.emitReturn(path.get("argument"), path.node.loc);
+    var rval = this.explodeExpression(path.get("argument"));
+    self.emit(withLoc(b.returnStatement(rval), path.node.loc));
     break;
 
   case "WithStatement":
@@ -898,7 +838,7 @@ Ep.explodeStatement = function(path, labelId) {
     var finallyLoc = stmt.finalizer && loc();
     var finallyEntry = finallyLoc && new leap.FinallyEntry(
       finallyLoc,
-      self.makeTempVar()
+      self.getTempVar()
     );
 
     if (finallyEntry) {
@@ -913,6 +853,7 @@ Ep.explodeStatement = function(path, labelId) {
     // Push information about this try statement so that the runtime can
     // figure out what to do if it gets an uncaught exception.
     self.pushTry(tryEntry, path.node.loc);
+    self.markAndBreak();
 
     self.leapManager.withEntry(tryEntry, function() {
       self.explodeStatement(path.get("block"));
@@ -920,14 +861,13 @@ Ep.explodeStatement = function(path, labelId) {
       if (catchLoc) {
         // If execution leaves the try block normally, the associated
         // catch block no longer applies.
-        self.popCatch(catchEntry, path.node.loc);
+        self.popCatch(catchEntry, handler.loc);
 
         if (finallyLoc) {
           // If we have both a catch block and a finally block, then
           // because we emit the catch block first, we need to jump over
           // it to the finally block.
           self.jump(finallyLoc);
-
         } else {
           // If there is no finally block, then we need to jump over the
           // catch block to the fall-through location.
@@ -939,11 +879,13 @@ Ep.explodeStatement = function(path, labelId) {
         // On entering a catch block, we must not have exited the
         // associated try block normally, so we won't have called
         // context.popCatch yet.  Call it here instead.
-        self.popCatch(catchEntry, path.node.loc);
+        self.popCatch(catchEntry, handler.loc);
+        self.markAndBreak();
 
         var bodyPath = path.get("handler", "body");
-        var safeParam = self.makeTempVar();
-        self.clearPendingException(safeParam);
+        var safeParam = self.getTempVar();
+        self.clearPendingException(safeParam, handler.loc);
+        self.markAndBreak();
 
         var catchScope = bodyPath.scope;
         var catchParamName = handler.param.name;
@@ -962,18 +904,22 @@ Ep.explodeStatement = function(path, labelId) {
         self.leapManager.withEntry(catchEntry, function() {
           self.explodeStatement(bodyPath);
         });
+
+        self.releaseTempVar();
       }
 
       if (finallyLoc) {
         self.mark(finallyLoc);
 
-        self.popFinally(finallyEntry, path.node.loc);
+        self.popFinally(finallyEntry, stmt.finalizer.loc);
+        self.markAndBreak();
 
         self.leapManager.withEntry(finallyEntry, function() {
           self.explodeStatement(path.get("finalizer"));
         });
 
         self.jump(finallyEntry.nextLocTempVar);
+        self.releaseTempVar();
       }
     });
 
@@ -990,12 +936,14 @@ Ep.explodeStatement = function(path, labelId) {
 
   case "DebuggerStatement":
     var after = loc();
-    self.emitAssign(self.vmProperty('stepping'),
-                    b.literal(true),
-                    path.node.loc);
-    self.emitAssign(self.contextProperty('staticBreakpoint'), b.literal(true));
-    self.emitAssign(self.contextProperty('next'), after);
-    self.emit(b.breakStatement(), true);
+    self.emitAssign(b.identifier('$__next'), after);
+    self.emit(
+      b.throwStatement(
+        b.newExpression(b.identifier('$ContinuationExc'), [])
+      ),
+      true
+    );
+
     self.mark(after);
 
     break;
@@ -1021,7 +969,7 @@ Ep.pushTry = function(tryEntry, loc) {
     catchEntry && catchEntry.firstLoc || nil,
     finallyEntry && finallyEntry.firstLoc || nil,
     finallyEntry && b.literal(
-      finallyEntry.nextLocTempVar.property.name
+      parseInt(finallyEntry.nextLocTempVar.name.replace('$__t', ''))
     ) || nil
   ];
 
@@ -1092,7 +1040,7 @@ Ep.explodeExpression = function(path, ignoreResult) {
     if (ignoreResult) {
       var after = loc();
       self.emit(expr);
-      self.emitAssign(self.contextProperty("next"), after);
+      self.emitAssign(b.identifier('$__next'), after);
       self.emit(b.breakStatement(), true);
       self.mark(after);
     } else {
@@ -1131,30 +1079,36 @@ Ep.explodeExpression = function(path, ignoreResult) {
   // Michael Bay movies. The point of exploding subexpressions is to
   // control the precise order in which the generated code realizes the
   // side effects of those subexpressions.
-  function explodeViaTempVar(tempVar, childPath, ignoreChildResult) {
+  function explodeViaTempVar(tempVar, childPath, ignoreChildResult, keepTempVar) {
     assert.ok(childPath instanceof types.NodePath);
-
     assert.ok(
       !ignoreChildResult || !tempVar,
       "Ignoring the result of a child expression but forcing it to " +
         "be assigned to a temporary variable?"
     );
-
-    var result = self.explodeExpression(childPath, ignoreChildResult);
-
-    if(isAtomic(result)) {
-      // don't create a new "mark" for any "atomic" expressions
-      return result;
+    
+    if(isAtomic(childPath.node)) {
+      // we still explode it because only the top-level expression is
+      // atomic, sub-expressions may not be
+      return self.explodeExpression(childPath, ignoreChildResult);
     }
     else if (!ignoreChildResult) {
-      // always explode!
+      var shouldRelease = !tempVar && !keepTempVar;
+      tempVar = tempVar || self.getTempVar();
+      var result = self.explodeExpression(childPath, ignoreChildResult);
+
+      // always mark!
       result = self.emitAssign(
-        tempVar || self.makeTempVar(),
+        tempVar,
         result,
         childPath.node.loc
       );
 
       self.markAndBreak();
+
+      if(shouldRelease) {
+        self.releaseTempVar();
+      }
     }
     return result;
   }
@@ -1177,111 +1131,59 @@ Ep.explodeExpression = function(path, ignoreResult) {
     var oldCalleePath = path.get("callee");
     var newCallee = self.explodeExpression(oldCalleePath);
 
-    var after = loc();
-    var tmp = self.makeTempVar();
-    //var prevContext = self.makeTempId();
-    var curContext = self.getProperty(newCallee, '$ctx');
-    var curContextTmp = self.makeTempId();
-    var args = path.get("arguments").map(function(argPath) {
-      return explodeViaTempVar(null, argPath);
+    var r = self.withTempVars(function() {
+      var after = loc();
+      var args = path.get("arguments").map(function(argPath) {
+        return explodeViaTempVar(null, argPath, false, true);
+      });
+      var tmp = self.getTempVar();
+      var callee = newCallee;
+
+      self.emitAssign(b.identifier('$__next'), after, path.node.loc);
+      self.emitAssign(b.identifier('$__tmpid'), b.literal(self.currentTempId()));
+      self.emitAssign(tmp, b.callExpression(callee, args));
+
+      self.emit(b.breakStatement(), true);
+      self.mark(after);
+
+      return tmp;
     });
-    var callee;
-    var res = self.makeTempId();
 
-    self.emit(
-      withLoc(self.declareVar(
-        curContextTmp.name,
-        b.callExpression(self.getProperty('VM', 'getContext'), [])
-      ), path.node.loc)
-    );
-
-    if(n.FunctionExpression.check(newCallee)) {
-      callee = self.makeTempId();
-      self.emitAssign(callee, newCallee);
-    }
-    else {
-      callee = newCallee;
-    }
-
-    self.emitAssign(self.getProperty(callee, '$ctx'), curContextTmp);
-    self.emit(self.declareVar(res.name, b.callExpression(callee, args)),
-              true);
-
-    self.emitAssign(self.contextProperty("next"), after);
-
-    self.emit(
-      b.ifStatement(
-        self.getProperty(curContextTmp, 'frame'),
-        b.blockStatement([
-          b.expressionStatement(
-            b.assignmentExpression(
-              '=',
-              self.contextProperty('childFrame'),
-              self.getProperty(curContextTmp, 'frame')
-            )
-          ),
-          b.expressionStatement(
-            b.assignmentExpression(
-              '=',
-              self.contextProperty('resultLoc'),
-              b.literal(tmp.property.name)
-            )
-          ),
-          b.expressionStatement(
-            b.assignmentExpression('=',
-                                   self.vmProperty('stepping'),
-                                   b.literal(true))
-          ),
-          b.breakStatement()
-        ])
-      ),
-      true
-    );
-
-    self.emitAssign(
-      tmp,
-      b.conditionalExpression(
-        self.getProperty(curContextTmp, 'isCompiled'),
-        self.getProperty(curContextTmp, 'rval'),
-        res
-      )
-    );
-
-    // self.emitAssign(curContext, prevContext);
-    self.emit(b.callExpression(self.getProperty('VM', 'releaseContext') ,[]),
-              true);
-
-    self.emit(b.breakStatement(), true);
-    self.mark(after);
-    return tmp;
+    return r;
 
   case "NewExpression":
     // TODO: this should be the last major expression type I need to
     // fix up to be able to trace/step through. can't call native new
-    return finish(b.newExpression(
-      explodeViaTempVar(null, path.get("callee")),
-      path.get("arguments").map(function(argPath) {
-        return explodeViaTempVar(null, argPath);
-      })
-    ));
+    return self.withTempVars(function() {
+      return finish(b.newExpression(
+        explodeViaTempVar(null, path.get("callee"), false, true),
+        path.get("arguments").map(function(argPath) {
+          return explodeViaTempVar(null, argPath, false, true);
+        })
+      ));
+    });
 
   case "ObjectExpression":
-    return finish(b.objectExpression(
-      path.get("properties").map(function(propPath) {
-        return b.property(
-          propPath.value.kind,
-          propPath.value.key,
-          explodeViaTempVar(null, propPath.get("value"))
-        );
-      })
-    ));
+    return self.withTempVars(function() {
+      return finish(b.objectExpression(
+        path.get("properties").map(function(propPath) {
+          return b.property(
+            propPath.value.kind,
+            propPath.value.key,
+            explodeViaTempVar(null, propPath.get("value"), false, true)
+          );
+        })
+      ));
+    });
 
   case "ArrayExpression":
-    return finish(b.arrayExpression(
-      path.get("elements").map(function(elemPath) {
-        return explodeViaTempVar(null, elemPath);
-      })
-    ));
+    return self.withTempVars(function() {
+      return finish(b.arrayExpression(
+        path.get("elements").map(function(elemPath) {
+          return explodeViaTempVar(null, elemPath, false, true);
+        })
+      ));
+    });
 
   case "SequenceExpression":
     var lastIndex = expr.expressions.length - 1;
@@ -1299,22 +1201,24 @@ Ep.explodeExpression = function(path, ignoreResult) {
   case "LogicalExpression":
     var after = loc();
 
-    if (!ignoreResult) {
-      result = self.makeTempVar();
-    }
+    self.withTempVars(function() {
+      if (!ignoreResult) {
+        result = self.getTempVar();
+      }
 
-    var left = explodeViaTempVar(result, path.get("left"));
+      var left = explodeViaTempVar(result, path.get("left"), false, true);
 
-    if (expr.operator === "&&") {
-      self.jumpIfNot(left, after);
-    } else if (expr.operator = "||") {
-      self.jumpIf(left, after);
-    }
+      if (expr.operator === "&&") {
+        self.jumpIfNot(left, after, path.get("left").node.loc);
+      } else if (expr.operator === "||") {
+        self.jumpIf(left, after, path.get("left").node.loc);
+      }
 
-    explodeViaTempVar(result, path.get("right"), ignoreResult);
+      explodeViaTempVar(result, path.get("right"), ignoreResult, true);
 
-    self.mark(after);
-
+      self.mark(after);
+    });
+    
     return result;
 
   case "ConditionalExpression":
@@ -1322,10 +1226,10 @@ Ep.explodeExpression = function(path, ignoreResult) {
     var after = loc();
     var test = self.explodeExpression(path.get("test"));
 
-    self.jumpIfNot(test, elseLoc);
+    self.jumpIfNot(test, elseLoc, path.get("test").node.loc);
 
     if (!ignoreResult) {
-      result = self.makeTempVar();
+      result = self.getTempVar();
     }
 
     explodeViaTempVar(result, path.get("consequent"), ignoreResult);
@@ -1335,6 +1239,10 @@ Ep.explodeExpression = function(path, ignoreResult) {
     explodeViaTempVar(result, path.get("alternate"), ignoreResult);
 
     self.mark(after);
+
+    if(!ignoreResult) {
+      self.releaseTempVar();
+    }
 
     return result;
 
@@ -1348,11 +1256,13 @@ Ep.explodeExpression = function(path, ignoreResult) {
     ), path.node.loc));
 
   case "BinaryExpression":
-    return finish(withLoc(b.binaryExpression(
-      expr.operator,
-      explodeViaTempVar(null, path.get("left")),
-      explodeViaTempVar(null, path.get("right"))
-    ), path.node.loc));
+    return self.withTempVars(function() {
+      return finish(withLoc(b.binaryExpression(
+        expr.operator,
+        explodeViaTempVar(null, path.get("left"), false, true),
+        explodeViaTempVar(null, path.get("right"), false, true)
+      ), path.node.loc));
+    });
 
   case "AssignmentExpression":
     return finish(withLoc(b.assignmentExpression(
@@ -1368,31 +1278,31 @@ Ep.explodeExpression = function(path, ignoreResult) {
       expr.prefix
     ), path.node.loc));
 
-  case "YieldExpression":
-    var after = loc();
-    var arg = expr.argument && self.explodeExpression(path.get("argument"));
+  // case "YieldExpression":
+  //   var after = loc();
+  //   var arg = expr.argument && self.explodeExpression(path.get("argument"));
 
-    if (arg && expr.delegate) {
-      var result = self.makeTempVar();
+  //   if (arg && expr.delegate) {
+  //     var result = self.getTempVar();
 
-      self.emit(b.returnStatement(b.callExpression(
-        self.contextProperty("delegateYield"), [
-          arg,
-          b.literal(result.property.name),
-          after
-        ]
-      )));
+  //     self.emit(b.returnStatement(b.callExpression(
+  //       self.contextProperty("delegateYield"), [
+  //         arg,
+  //         b.literal(result.property.name),
+  //         after
+  //       ]
+  //     )));
 
-      self.mark(after);
+  //     self.mark(after);
 
-      return result;
-    }
+  //     return result;
+  //   }
 
-    self.emitAssign(self.contextProperty("next"), after);
-    self.emit(b.returnStatement(arg || null));
-    self.mark(after);
+    // self.emitAssign(b.identifier('$__next'), after);
+    // self.emit(b.returnStatement(arg || null));
+    // self.mark(after);
 
-    return self.contextProperty("sent");
+    // return self.contextProperty("sent");
 
   case "FunctionExpression":
   case "ThisExpression":
@@ -1680,7 +1590,7 @@ function FinallyEntry(firstLoc, nextLocTempVar) {
   Entry.call(this);
 
   n.Literal.assert(firstLoc);
-  n.MemberExpression.assert(nextLocTempVar);
+  n.Identifier.assert(nextLocTempVar);
 
   Object.defineProperties(this, {
     firstLoc: { value: firstLoc },
@@ -1813,25 +1723,6 @@ LMp.emitContinue = function(label) {
 
   if (loc === null) {
     throw new Error("illegal continue statement");
-  }
-
-  this.emitter.clearPendingException();
-  this.emitter.jump(loc);
-};
-
-LMp.emitReturn = function(argPath, srcLoc) {
-  assert.ok(argPath instanceof types.NodePath);
-
-  var loc = this._leapToEntry(function(entry) {
-    return getLeapLocation(entry, "returnLoc");
-  });
-
-  if (loc === null) {
-    throw new Error("illegal return statement");
-  }
-
-  if (argPath.value) {
-    this.emitter.setReturnValue(argPath, srcLoc);
   }
 
   this.emitter.clearPendingException();
@@ -2066,11 +1957,18 @@ exports.transform = function(ast, opts) {
           return acc || def.name.boxed || boxedVars.indexOf(def.name) !== -1;
         }, false);
 
+        // Ignore catch scopes
+        var from = r.from;
+        while(from.type == 'catch' && from.upper) {
+          from = from.upper;
+        }
+
         if(defBoxed ||
            (!r.resolved &&
             boxedVars.indexOf(r.identifier.name) !== -1) ||
            (r.resolved &&
-            r.resolved.scope !== r.from &&
+            r.resolved.scope.type !== 'catch' &&
+            r.resolved.scope !== from &&
 
             // completely ignore references to a named function
             // expression, as that binding is immutabled (super weird)
@@ -2138,12 +2036,6 @@ exports.transform = function(ast, opts) {
       rootFn[0] = b.expressionStatement(b.literal(null));
     }
 
-    var ctx = b.memberExpression(
-      b.identifier('$__eval'),
-      b.identifier('$ctx'),
-      false
-    );
-
     rootFn.unshift(b.expressionStatement(
       b.callExpression(
         b.memberExpression(
@@ -2154,23 +2046,6 @@ exports.transform = function(ast, opts) {
         []
       )
     ));
-
-    rootFn.push(
-      b.expressionStatement(
-        b.assignmentExpression(
-          '=',
-          ctx,
-          b.callExpression(
-            b.memberExpression(
-              b.identifier('VM'),
-              b.identifier('getContext'),
-              false
-            ),
-            []
-          )
-        )
-      )
-    );
 
     rootFn.push(b.variableDeclaration(
       'var',
@@ -2248,7 +2123,6 @@ function visitNode(node, scope, debugInfo) {
   var isExpr = node.id.name === '$__eval';
   var nameId = node.id;
   var funcName = node.id.name;
-  var contextId = b.identifier('$ctx');
   var vars = hoist(node);
   var localScope = !vars ? node.params : node.params.concat(
     vars.declarations.map(function(v) {
@@ -2263,7 +2137,7 @@ function visitNode(node, scope, debugInfo) {
     if(n.Function.check(child)) {
       return false;
     }
-    
+
     if(n.TryStatement.check(child)) {
       hasTry = true;
     }
@@ -2280,57 +2154,14 @@ function visitNode(node, scope, debugInfo) {
   });
 
   // Now compile me
-  var em = new Emitter(contextId, debugId, debugInfo);
+  var em = new Emitter(debugId, debugInfo);
   var path = new types.NodePath(node);
 
   em.explode(path.get("body"));
 
-  var machine = em.getMachine(node.id.name, localScope);
-  var finalBody = machine.ast;
+  var finalBody = em.getMachine(node.id.name, localScope);
 
   // construct the thing
-
-  function addSnapshot(arr) {
-    arr.push.apply(arr, [
-      // if it falls out of the loops, that means we've paused so create
-      // a frame
-      b.expressionStatement(
-        b.assignmentExpression(
-          '=',
-          em.contextProperty('frame'),
-          b.newExpression(
-            b.identifier('$Frame'),
-            [b.literal(debugId),
-             b.literal(funcName.slice(1)),
-             b.identifier(funcName),
-             b.objectExpression(
-               localScope.map(function(id) {
-                 return b.property(
-                   'init',
-                   b.literal(id.name),
-                   id
-                 );
-               })
-             ),
-             b.arrayExpression(localScope.concat(scope).map(function(id) {
-               return b.objectExpression([
-                 b.property('init', b.literal('name'), b.literal(id.name)),
-                 b.property('init', b.literal('boxed'), b.literal(!!id.boxed))
-               ]);
-             })),
-             b.thisExpression(),
-             hasTry ? b.identifier('tryStack') : b.literal(null),
-             contextId,
-             em.contextProperty('childFrame')]
-          )
-        )
-      ),
-
-      // clean up the function
-      em.assign(em.getProperty(funcName, '$ctx'), b.identifier('undefined'))
-    ]);
-  }
-
   var inner = [];
 
   if(!isGlobal && !isExpr) {
@@ -2351,21 +2182,10 @@ function visitNode(node, scope, debugInfo) {
     }
   }
 
-  inner.push(
-    b.variableDeclaration('var', [
-      b.variableDeclarator(
-        b.identifier(machine.contextId),
-        b.memberExpression(node.id, b.identifier('$ctx'), false)
-      )
-    ])
-  );
-
   if(!isGlobal && !isExpr) {
     inner.push.apply(inner, [
       b.ifStatement(
-        b.binaryExpression('===',
-                           b.identifier('$ctx'),
-                           b.identifier('undefined')), // is "identifier" right?
+        b.unaryExpression('!', em.vmProperty('running')),
         b.returnStatement(
           b.callExpression(
             b.memberExpression(b.identifier('VM'),
@@ -2374,38 +2194,89 @@ function visitNode(node, scope, debugInfo) {
             [node.id, b.literal(null), b.thisExpression(), b.identifier('arguments')]
           )
         )
-      ),
-      b.expressionStatement(
-        b.assignmentExpression(
-          '=',
-          b.memberExpression(b.identifier('$ctx'), b.identifier('isCompiled'),
-                             false),
-          b.literal(true)
-        )
       )
     ]);
+  }
+
+  // internal harnesses to run the function
+  inner.push(em.declareVar('$__next', b.literal(0)));
+  inner.push(em.declareVar('$__tmpid', b.literal(0)));
+  for(var i=1, l=em.numTempVars(); i<=l; i++) {
+    inner.push(em.declareVar('$__t' + i, null));
   }
 
   if(hasTry) {
     inner.push(em.declareVar('tryStack', b.arrayExpression([])));
   }
 
+  var tmpSave = [];
+  for(var i=1, l=em.numTempVars(); i<=l; i++) {
+    tmpSave.push(b.property(
+      'init',
+      b.identifier('$__t' + i),
+      b.identifier('$__t' + i)
+    ));
+  }
+
   inner = inner.concat([
     b.tryStatement(
-      b.blockStatement([getRestoration(em, isGlobal, localScope, hasTry)]
+      b.blockStatement(getRestoration(em, isGlobal, localScope, hasTry)
                        .concat(finalBody)),
       b.catchClause(b.identifier('e'), null, b.blockStatement([
-        b.expressionStatement(
-          b.assignmentExpression(
-            '=',
-            b.memberExpression(b.identifier('VM'), b.identifier('error'), false),
-            b.identifier('e')
+        b.ifStatement(
+          b.unaryExpression(
+            '!',
+            b.binaryExpression('instanceof',
+                               b.identifier('e'),
+                               b.identifier('$ContinuationExc'))
+          ),
+          b.expressionStatement(
+            b.assignmentExpression(
+              '=',
+              b.identifier('e'),
+              b.newExpression(
+                b.identifier('$ContinuationExc'),
+                [b.identifier('e')]
+              )
+            )
           )
-        )
+        ),
+        
+        b.ifStatement(
+          b.unaryExpression('!', em.getProperty('e', 'reuse')),
+          b.expressionStatement(
+            b.callExpression(em.getProperty('e', 'pushFrame'), [
+              b.newExpression(
+                b.identifier('$Frame'),
+                [b.literal(debugId),
+                 b.literal(funcName.slice(1)),
+                 b.identifier(funcName),
+                 b.identifier('$__next'),
+                 b.objectExpression(
+                   localScope.map(function(id) {
+                     return b.property('init', id, id);
+                   }).concat(tmpSave)
+                 ),
+                 // b.literal(null),
+                 b.arrayExpression(localScope.concat(scope).map(function(id) {
+                   return b.objectExpression([
+                     b.property('init', b.literal('name'), b.literal(id.name)),
+                     b.property('init', b.literal('boxed'), b.literal(!!id.boxed))
+                   ]);
+                 })),
+                 b.thisExpression(),
+                 hasTry ? b.identifier('tryStack') : b.literal(null),
+                 b.identifier('$__tmpid')]
+              )
+            ])
+          )
+        ),
+
+        em.assign(em.getProperty('e', 'reuse'), b.literal(false)),
+        b.throwStatement(b.identifier('e'))
       ]))
     )
   ]);
-  addSnapshot(inner);
 
   if(isGlobal || isExpr) {
     node.body = b.blockStatement([
@@ -2427,81 +2298,107 @@ function getRestoration(self, isGlobal, localScope, hasTry) {
   // restoring a frame
   var restoration = [];
 
+  restoration.push(
+    self.declareVar(
+      '$__frame',
+      b.callExpression(self.vmProperty('popFrame'), [])
+    )
+  );
+
   if(!isGlobal) {
-    restoration = localScope.map(function(id) {
+    restoration = restoration.concat(localScope.map(function(id) {
       return b.expressionStatement(
         b.assignmentExpression(
           '=',
           b.identifier(id.name),
           self.getProperty(
-            self.getProperty(self.contextProperty('frame'), 'state'),
+            self.getProperty(b.identifier('$__frame'), 'state'),
             id
           )
         )
       );
-    });
+    }));
   }
 
+  restoration.push(
+    self.assign(b.identifier('$__next'),
+                self.getProperty(b.identifier('$__frame'), 'next'))
+  );
   if(hasTry) {
     restoration.push(
-      self.assign(b.identifier('tryStack'), 
-                  self.getProperty(self.contextProperty('frame'), 'tryStack'))
+      self.assign(b.identifier('tryStack'),
+                  self.getProperty(b.identifier('$__frame'), 'tryStack'))
     );
   }
 
   restoration = restoration.concat([
-    self.declareVar('$child', self.getProperty(self.contextProperty('frame'), 'child')),
+    self.declareVar(
+      '$__child',
+      b.callExpression(self.vmProperty('nextFrame'), [])
+    ),
     b.ifStatement(
-      b.identifier('$child'),
+      b.identifier('$__child'),
       b.blockStatement([
-        self.declareVar('$child$ctx', self.getProperty('$child', 'ctx')),
-        self.assign(self.getProperty(self.getProperty('$child', 'fn'), '$ctx'),
-                    b.identifier('$child$ctx')),
-        b.expressionStatement(
+        self.assign(
+          self.getProperty(
+            self.getProperty(
+              '$__frame',
+              b.identifier('state')
+            ),
+            b.binaryExpression(
+              '+',
+              b.literal('$__t'),
+              self.getProperty('$__frame', 'tmpid')
+            ),
+            true
+          ),
           b.callExpression(
-            self.getProperty(self.getProperty('$child', 'fn'), 'call'),
-            [self.getProperty('$child', 'thisPtr')]
+            self.getProperty(self.getProperty('$__child', 'fn'), 'call'),
+            [self.getProperty('$__child', 'thisPtr')]
           )
         ),
 
+        // if we are stepping, stop executing here so that it
+        // pauses on the "return" instruction
         b.ifStatement(
-          self.getProperty('$child$ctx', 'frame'),
-          b.blockStatement([
-            self.assign(self.getProperty(self.contextProperty('frame'), 'child'),
-                        self.getProperty('$child$ctx', 'frame')),
-            b.returnStatement(null)
-          ]),
-          b.blockStatement([
-            self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
-            self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null)),
-            self.assign(self.getProperty('$ctx',
-                                         self.contextProperty('resultLoc'),
-                                         true),
-                        self.getProperty('$child$ctx', 'rval')),
-            // if we are stepping, stop executing here so that it
-            // pauses on the "return" instruction
-            b.ifStatement(self.vmProperty('stepping'),
-                          b.throwStatement(b.literal(null)))
-          ])
+          self.vmProperty('stepping'),
+          b.throwStatement(
+            b.newExpression(b.identifier('$ContinuationExc'), 
+                            [b.literal(null),
+                             b.identifier('$__frame')])
+          )
         )
-      ]),
-      b.blockStatement([
-        self.assign(self.getProperty('$ctx', 'frame'), b.literal(null)),
-        self.assign(self.getProperty('$ctx', 'childFrame'), b.literal(null))
       ])
     )
   ]);
 
-  return b.ifStatement(
-    self.contextProperty('frame'),
-    b.blockStatement(restoration),
+  for(var i=1, l=self.numTempVars(); i<=l; i++) {
+    restoration.push(b.expressionStatement(
+      b.assignmentExpression(
+        '=',
+        b.identifier('$__t' + i),
+        self.getProperty(
+          self.getProperty(b.identifier('$__frame'), 'state'),
+          '$__t' + i
+        )
+      )
+    ));
+  }
+
+  return [
     b.ifStatement(
-      // if we are stepping, stop executing so it is stopped at
-      // the first instruction of the new frame
-      self.vmProperty('stepping'),
-      b.throwStatement(b.literal(null))
+      self.vmProperty('doRestore'),
+      b.blockStatement(restoration),
+      b.ifStatement(
+        // if we are stepping, stop executing so it is stopped at
+        // the first instruction of the new frame
+        self.vmProperty('stepping'),
+        b.throwStatement(
+          b.newExpression(b.identifier('$ContinuationExc'), [])
+        )
+      )
     )
-  );
+  ];
 }
 
 },{"./debug":1,"./emit":2,"./hoist":3,"./util":6,"assert":65,"ast-types":19,"escope":38}],8:[function(require,module,exports){

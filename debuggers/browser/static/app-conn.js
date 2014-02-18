@@ -51,19 +51,13 @@ client.on('query', function(names) {
 
       return top.scope.map(function(v) { return v.name; });
     case 'stack':
-      var frame = VM.getRootFrame();
-      var stack = [];
-      if(!frame) return stack;
-
-      do {
-        stack.push({ 
+      return VM.stack ? VM.stack.map(function(frame) {
+        return {
           name: frame.name,
           scope: _.mapValues(frame.scope, format),
           loc: frame.getLocation(VM)
-        });
-        frame = frame.child;
-      } while(frame);
-      return stack;
+        };
+      }) : [];
     }
   });
 
@@ -96,9 +90,9 @@ VM.on('breakpoint', function() {
                 args: [VM.getLocation()] });
 });
 
-VM.on('step', function() {
-  client.send({ type: 'step' });
-});
+// VM.on('step', function() {
+//   client.send({ type: 'step' });
+// });
 
 VM.on('finish', function() {
   client.send({ type: 'finish' });

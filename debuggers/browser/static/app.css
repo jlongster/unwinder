@@ -22,7 +22,7 @@ hidden {
 /* layout */
 
 .app-inner {
-    height: calc(100% - 4.5em);
+    height: 100%;
 }
 
 .footer {
@@ -60,6 +60,25 @@ button.close:hover {
 
 /* editor */
 
+.editor-wrapper {
+    position: absolute;
+    bottom: 1.5em;
+    left: 1.5em;
+    width: 45%;
+    z-index: 400;
+}
+
+.editor {
+    height: 400px;
+}
+
+.editor .CodeMirror {
+    background: none;
+    background-color: rgba(50, 50, 50, .5);
+    box-shadow: none;
+    border-radius: 5px;
+}
+
 .editor .highlight {
     background-color: #393939;
     padding: .5em;
@@ -67,7 +86,7 @@ button.close:hover {
 
 .editor .highlight-text {
     background-color: #606060;
-    box-shadow: 0 0 5px red;
+    /* box-shadow: 0 0 5px red; */
 }
 
 .editor .breakpoints {
@@ -86,6 +105,8 @@ div.marker {
 /* display */
 
 .display {
+    width: 100%;
+    height: 100%;
     white-space: pre;
     font-family: monaco, monospace;
     color: white;
@@ -99,7 +120,10 @@ div.marker {
 /* toolset */
 
 .toolset {
-    position: relative;
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 50%;
     background-color: #999999;
     clear: both;
     padding-top: .75em;
@@ -160,16 +184,6 @@ div.marker {
 
 /* debugger */
 /* console */
-
-.debugger,
-.console.with-debugger {
-    width: 75%;
-    float: left;
-}
-
-.console.with-debugger {
-    width: 25%;
-}
 
 .debugger .state {
     float: right;
@@ -244,3 +258,10 @@ div.marker {
     background-color: #446644;
     border: 1px solid #446644;
 }
+
+/* resources */
+
+.resources li a {
+    margin-left: 1em;
+}
+
