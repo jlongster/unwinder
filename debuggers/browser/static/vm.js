@@ -4,14 +4,14 @@
 
   // since eval is used, need access to the compiler
 
-  if(typeof module !== 'undefined') {
-    var _localpath = __dirname + '/main.js';
-    var _main = require('fs').existsSync(_localpath) ? _localpath : '../main.js';
-    var compiler = require(_main);
-  }
-  else {
-    var compiler = main.js;
-  }
+  // if(typeof module !== 'undefined') {
+  //   var _localpath = __dirname + '/main.js';
+  //   var _main = require('fs').existsSync(_localpath) ? _localpath : '../main.js';
+  //   var compiler = require(_main);
+  // }
+  // else {
+  //   var compiler = main.js;
+  // }
 
   // vm
 
@@ -31,6 +31,8 @@
     this.stepping = false;
     this.prevStates = [];
     this.tryStack = [];
+    this.machineBreaks = [];
+    this.machineWatches = [];
   }
 
   // 3 ways to execute code:
@@ -110,6 +112,7 @@
         // We need to get past this instruction that has a breakpoint, so
         // turn off breakpoints and step past it, then turn them back on
         // again and execute normally
+        this.running = true;
         this.stepping = true;
         this.hasBreakpoints = false;
         this.restore();
@@ -358,14 +361,14 @@
 
   Machine.prototype.setDebugInfo = function(info) {
     this.debugInfo = info || new DebugInfo([]);
-    this.machineBreaks = new Array(this.debugInfo.data.length);
+    this.machineBreaks = new Array(info.data.length);
 
-    for(var i=0; i<this.debugInfo.data.length; i++) {
+    for(var i=0; i<info.data.length; i++) {
       this.machineBreaks[i] = [];
     }
 
-    this.debugInfo.breakpoints.forEach(function(line) {
-      var pos = info.lineToMachinePos(line);
+    info.breakpoints.forEach(function(bp) {
+      var pos = bp.pos;
       if(!pos) return;
 
       var machineId = pos.machineId;
@@ -373,7 +376,7 @@
 
       if(this.machineBreaks[machineId][locId] === undefined) {
         this.hasBreakpoints = true;
-        this.machineBreaks[pos.machineId][pos.locId] = true;
+        this.machineBreaks[pos.machineId][pos.locId] = bp.type;
       }
     }.bind(this));
   };
@@ -677,14 +680,61 @@
     return null;
   };
 
+  DebugInfo.prototype.closestMachinePos = function(start, end) {
+    if(!this.data) return null;
+    
+    for(var i=0, l=this.data.length; i<l; i++) {
+      var locs = this.data[i].locs;
+      var keys = Object.keys(locs);
+      keys = keys.map(function(k) { return parseInt(k); });
+      keys.sort(function(a, b) { return a-b; });
+
+      for(var cur=0, len=keys.length; cur<len; cur++) {
+        var loc = locs[keys[cur]];
+
+        if((loc.start.line < start.line ||
+            (loc.start.line === start.line &&
+             loc.start.column <= start.ch)) &&
+           (loc.end.line > end.line ||
+            (loc.end.line === end.line &&
+             loc.end.column >= end.ch))) {
+          return {
+            machineId: i,
+            locId: keys[cur]
+          };
+        }
+      }
+    }
+
+    return null;    
+  };
+
   DebugInfo.prototype.toggleBreakpoint = function(line) {
-    var idx = this.breakpoints.indexOf(line);
-    if(idx === -1) {
-      this.breakpoints.push(line);
+    var pos = this.lineToMachinePos(line);
+    var cur;
+    this.breakpoints.forEach(function(bp, i) {
+      if(bp.line === line) {
+        cur = i;
+      }
+    });
+
+    if(cur != null) {
+      this.breakpoints.splice(cur, 1);
     }
     else {
-      this.breakpoints.splice(idx, 1);
+      this.breakpoints.push({
+        line: line,
+        pos: pos,
+        type: 'break'
+      });
     }
+  };
+
+  DebugInfo.prototype.setWatch = function(pos) {
+    this.breakpoints.push({
+      pos: pos,
+      type: 'watch'
+    });
   };
 
   function ContinuationExc(error, initialFrame) {

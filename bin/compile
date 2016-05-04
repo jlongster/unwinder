@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+
+var fs = require('fs');
+var compiler = require(__dirname + '/../main');
+
+var src = fs.readFileSync(process.argv[2], "utf-8");
+var output = compiler(src, { includeDebug: true });
+var finalSrc =
+    "var $Machine = require('./runtime/vm.js').$Machine;\n" +
+    "var $ContinuationExc = require('./runtime/vm.js').$ContinuationExc;\n" +
+    "var $Frame = require('./runtime/vm.js').$Frame;" +
+    "var $DebugInfo = require('./runtime/vm.js').$DebugInfo;" +
+    output.code +
+    "var VM = new $Machine();\n" +
+    "VM.on('paused', function() { VM.continue() });\n" +
+    "VM.on('error', function(e) { console.log('error', e) });\n" +
+    "VM.setDebugInfo(new $DebugInfo(__debugInfo));\n" +
+    "VM.execute($__global);"
+
+fs.writeFileSync(
+  'a.out',
+  finalSrc
+);

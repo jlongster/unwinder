@@ -2103,7 +2103,6 @@ function visitNode(node, scope, debugInfo) {
     return;
   }
 
-  var debugId = debugInfo.makeId();
   node.generator = false;
 
   if (node.expression) {
@@ -2154,6 +2153,7 @@ function visitNode(node, scope, debugInfo) {
   });
 
   // Now compile me
+  var debugId = debugInfo.makeId();
   var em = new Emitter(debugId, debugInfo);
   var path = new types.NodePath(node);
 
@@ -18347,27 +18347,67 @@ defProp(exports, "makeUniqueKey", {
     value: makeUniqueKey
 });
 
-function makeAccessor() {
-    var secrets = {};
+function wrap(obj, value) {
+    var old = obj[value.name];
+    defProp(obj, value.name, { value: value });
+    return old;
+}
+
+// Object.getOwnPropertyNames is the only way to enumerate non-enumerable
+// properties, so if we wrap it to ignore our secret keys, there should be
+// no way (except guessing) to access those properties.
+var realGetOPNs = wrap(Object, function getOwnPropertyNames(object) {
+    for (var names = realGetOPNs(object),
+             src = 0,
+             dst = 0,
+             len = names.length;
+         src < len;
+         ++src) {
+        if (!hasOwn.call(uniqueKeys, names[src])) {
+            if (src > dst) {
+                names[dst] = names[src];
+            }
+            ++dst;
+        }
+    }
+    names.length = dst;
+    return names;
+});
+
+function defaultCreatorFn(object) {
+    return create(null);
+}
+
+function makeAccessor(secretCreatorFn) {
     var brand = makeUniqueKey();
+    var passkey = create(null);
+
+    secretCreatorFn = secretCreatorFn || defaultCreatorFn;
 
     function register(object) {
-        var key = makeUniqueKey();
-        defProp(object, brand, { value: key });
+        var secret; // Created lazily.
+        defProp(object, brand, {
+            value: function(key, forget) {
+                // Only code that has access to the passkey can retrieve
+                // (or forget) the secret object.
+                if (key === passkey) {
+                    return forget
+                        ? secret = null
+                        : secret || (secret = secretCreatorFn(object));
+                }
+            }
+        });
     }
 
     function accessor(object) {
         if (!hasOwn.call(object, brand))
             register(object);
-
-        var key = object[brand];
-        return hasOwn.call(secrets, key)
-            ? secrets[key]
-            : secrets[key] = create(null);
+        return object[brand](passkey);
     }
 
     accessor.forget = function(object) {
-        delete secrets[object[brand]];
+        if (hasOwn.call(object, brand))
+            object[brand](passkey, true);
     };
 
     return accessor;

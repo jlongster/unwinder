@@ -10,7 +10,6 @@
 
 var assert = require("assert");
 var path = require("path");
-var fs = require("fs");
 var types = require("ast-types");
 var b = types.builders;
 var transform = require("./lib/visit").transform;
@@ -27,17 +26,8 @@ assert.ok(
 
 function regenerator(source, options) {
   options = utils.defaults(options || {}, {
-    includeRuntime: false,
     supportBlockBinding: true
   });
-
-  var runtime = options.includeRuntime ? fs.readFileSync(
-    regenerator.runtime.dev, "utf-8"
-  ) + "\n" : "";
-
-  var runtimeBody = recast.parse(runtime, {
-    sourceFileName: regenerator.runtime.dev
-  }).program.body;
 
   var supportBlockBinding = !!options.supportBlockBinding;
   if (supportBlockBinding) {
@@ -76,31 +66,6 @@ function regenerator(source, options) {
   var transformed = transform(ast, options);
   recastAst.program = transformed.ast;
   var appendix = '';
-
-  // Include the runtime by modifying the AST rather than by concatenating
-  // strings. This technique will allow for more accurate source mapping.
-  if (options.includeRuntime) {
-    // recastAst.program.body = [b.variableDeclaration(
-    //   'var',
-    //   [b.variableDeclarator(
-    //     b.identifier('$__global'),
-    //     b.callExpression(
-    //       b.functionExpression(
-    //         null, [],
-    //         b.blockStatement(recastAst.program.body)
-    //       ),
-    //       []
-    //     )
-    //   )]
-    // )];
-
-    var body = recastAst.program.body;
-    body.unshift.apply(body, runtimeBody);
-
-    appendix += 'var VM = new $Machine();\n' +
-      'VM.on("error", function(e) { throw e; });\n' +
-      'VM.run($__global, __debugInfo);';
-  }
 
   if(options.includeDebug) {
     var body = recastAst.program.body;

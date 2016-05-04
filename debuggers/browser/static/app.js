@@ -24,7 +24,8 @@ var App = React.createClass({
   },
 
   componentDidMount: function() {
-    $.get('src.txt', function(res) {
+    var filename = (window.location.hash || '#src.txt').slice(1);
+    $.get(filename, function(res) {
       this.setState({ source: res });
     }.bind(this));
 
@@ -193,7 +194,7 @@ var App = React.createClass({
 
   openToolset: function() {
     this.setState({ toolsetOpen: true });
-    this.refs.toolset.tool('debugger');
+    //this.refs.toolset.tool('debugger');
   },
 
   closeToolset: function() {
@@ -202,6 +203,10 @@ var App = React.createClass({
 
   getMachine: function() {
     return this.state.machine;
+  },
+
+  toggleCode: function() {
+    this.setState({ codeOpen: !this.state.codeOpen });
   },
 
   render: function() {
@@ -213,22 +218,24 @@ var App = React.createClass({
           { className: 'editor-wrapper' },
           Editor({
             ref: 'editor',
-            className: (this.state.toolsetOpen ? 'partial' : 'full'),
             value: this.state.source,
             client: this.state.client,
             onChange: this.handleSourceChange,
             onToggleBreakpoint: this.handleBreakpoint
           }),
           Footer({ onRun: this.run,
+                   onCompile: this.compile,
                    onRunExpression: this.runExpression,
                    toolsetOpen: this.state.toolsetOpen,
-                   onToggleToolset: this.toggleToolset })
+                   onToggleToolset: this.toggleToolset,
+                   onCode: this.toggleCode })
         ),
         Display({ ref: 'display',
                   className: (this.state.toolsetOpen ? 'partial' : 'full'),
                   value: this.state.displayValue }),
         Toolset({ className: this.state.toolsetOpen ? '' : 'hidden',
                   ref: 'toolset',
+                  toolsetOpen: this.state.toolsetOpen,
                   client: this.state.client,
                   onClose: this.closeToolset,
                   getEditor: function() {
@@ -387,7 +394,7 @@ var Toolset = React.createClass({
     var cls = ['toolset', this.props.className || ''].join(' ');
 
     var activeClass = function(tool, cls) {
-      return this.state.openTool === tool ? cls : null;
+      return this.props.toolsetOpen ? cls : null;
     }.bind(this);
 
     return dom.div(
@@ -435,13 +442,13 @@ var Debugger = React.createClass({
     if(prevProps.client !== this.props.client) {
       var client = this.props.client;
 
-      client.on('error', function(err, loc) {
-        this.handleError(err, loc);
+      client.on('error', function(err, stack, loc) {
+        this.handleError(err, stack, loc);
       }.bind(this));
 
       client.on('finish', function() {
         this.props.getEditor().highlight(null);
-        this.printReport();
+        //this.printReport();
       }.bind(this));
     }
   },
@@ -459,12 +466,12 @@ var Debugger = React.createClass({
     this.props.client.send({ type: 'stepOver' });
   },
 
-  handleError: function(err, loc) {
+  handleError: function(err, stack, loc) {
     if(loc) {
       this.props.getEditor().highlight(loc);
     }
 
-    this.props.getConsole().log(err.toString());
+    this.props.getConsole().log(err.toString() + '\n' + stack);
     this.printReport();
   },
 
@@ -630,7 +637,8 @@ var Resources = React.createClass({
     return {
       urls: [
         'http://jlongster.com/s/cloth/gl-matrix.js',
-        'http://jlongster.com/s/cloth/renderers.js'
+        'http://jlongster.com/s/cloth/renderers.js',
+        'mouse.js'
       ]
     };
   },

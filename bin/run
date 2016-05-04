@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+
+var Machine = require('../runtime/vm.js').$Machine;
+var VM = new Machine();
+
+VM.on("error", function(e) {
+  console.log('Error:', e.stack);
+});
+
+VM.on("paused", function(e) {
+  console.log('you broke it', VM.getLocation());
+  VM.continue()
+});
+
+VM.loadScript(process.argv[2]);

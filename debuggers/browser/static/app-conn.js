@@ -100,12 +100,12 @@ VM.on('finish', function() {
 
 VM.on('error', function(err) {
   client.send({ type: 'error',
-                args: [err.toString(), VM.getLocation()]});
+                args: [err.toString(), err.stack, VM.getLocation()]});
 });
 
-// window.console = {
-//   log: function() {
-//     var str = Array.prototype.slice.call(arguments).join(' ');
-//     client.send({ type: 'log', args: [str] });
-//   }
-// };
+window.console = {
+  log: function() {
+    var str = Array.prototype.slice.call(arguments).join(' ');
+    client.send({ type: 'log', args: [str] });
+  }
+};

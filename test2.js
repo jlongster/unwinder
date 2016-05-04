@@ -1,12 +1,12 @@
 
-
-function mumble(i) {
-  var z = 10;
-  for(var j=1; j<=i; j++) {
-    debugger;
-    z *= j;
+function foo(x) {
+  if(x <= 0) {
+    return x;
+  } else {
+    console.log('hi', x);
+    return x + foo(x - 1);
   }
-  return z;
 }
 
-console.log(mumble(5));
+debugger;
+console.log(foo(3));

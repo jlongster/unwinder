@@ -60,7 +60,8 @@ button.close:hover {
 
 /* editor */
 
-.editor-wrapper {
+.editor-wrapper,
+.compiled {
     position: absolute;
     bottom: 1.5em;
     left: 1.5em;
@@ -102,6 +103,12 @@ div.marker {
     margin-top: -2px;
 }
 
+.compiled {
+    left: auto;
+    right: 1.5em;
+    height: 600px;
+}
+
 /* display */
 
 .display {
@@ -121,8 +128,8 @@ div.marker {
 
 .toolset {
     position: absolute;
-    bottom: 0;
     right: 0;
+    bottom: 0;
     width: 50%;
     background-color: #999999;
     clear: both;
