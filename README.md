@@ -34,8 +34,10 @@ and compile it with `./bin/compile program.js`. A file called `a.out`
 will be generated, or you can specify an output file as the second
 argument.
 
+```
 $ ./bin/compile program.js <output-file>
 $ node <output-file>
+```
 
 There is also a browser editor included in the `browser` directory.
 Open `browser/index.html` to run it, and you will be able to
