@@ -384,10 +384,13 @@ Machine.prototype.toggleBreakpoint = function(line) {
 
   if(pos) {
     this.hasBreakpoints = true;
-    this.machineBreaks[pos.machineId][pos.locId] = true;
+    if(this.machineBreaks[pos.machineId][pos.locId]) {
+      this.machineBreaks[pos.machineId][pos.locId] = false;
+    }
+    else {
+      this.machineBreaks[pos.machineId][pos.locId] = true;
+    }
   }
-
-  // TODO: remove breakpoints...
 };
 
 Machine.prototype.callCC = function() {

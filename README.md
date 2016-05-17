@@ -1,71 +1,93 @@
-regenerator [![Build Status](https://travis-ci.org/facebook/regenerator.png?branch=master)](https://travis-ci.org/facebook/regenerator)
-===
 
-This package implements a fully-functional source transformation that
-takes the proposed syntax for generators/`yield` from future versions of
-JS ([ECMAScript6 or ES6](http://wiki.ecmascript.org/doku.php?id=harmony:specification_drafts), experimentally implemented in Node.js v0.11) and
-spits out efficient JS-of-today (ES5) that behaves the same way.
+# unwinder
 
-A small runtime library (less than 1KB compressed) is required to provide the
-`wrapGenerator` function. You can install it either as a CommonJS module
-or as a standalone .js file, whichever you prefer.
+An implementation of continuations in JavaScript. Includes built-in
+support for breakpoints (implemented with continuations) and setting
+breakpoints like on running scripts.
 
-Installation
----
+This implements the paper "[Exceptional Continuations in
+JavaScript](http://www.schemeworkshop.org/2007/procPaper4.pdf)". It
+started as a fork of
+[regenerator](https://github.com/facebook/regenerator) from January
+2014, so the code is outdated. However, it is useful for demos and
+exploring interesting patterns.
 
-From NPM:
-```sh
-npm install -g regenerator
-```
+**Do not build actual software with this**. Not only is it an old
+regenerator fork, but my work on top of it is hacky. There are no
+tests, as I was figuring out what was even possible. You will likely
+hit bugs when trying to write non-trivial code against this.
 
-From GitHub:
-```sh
-cd path/to/node_modules
-git clone git://github.com/benjamn/regenerator.git
-cd regenerator
-npm install .
-npm test
-```
+With that said, fixing those bugs is usually straight-forward. Each
+expression needs to mark itself correcly in the state machine. Usually
+this is a matter of changing 1 or 2 lines of code.
 
-Usage
----
+There is little ES6 support, but that could be fixed by first
+transforming code with Babel.
 
-You have several options for using this module.
+## Getting Started
 
-Simplest usage:
-```sh
-regenerator es6.js > es5.js # Just the transform.
-regenerator --include-runtime es6.js > es5.js # Add the runtime too.
-```
+The simplest way is to write some code in a file called `program.js`
+and compile it with `./bin/compile program.js`. A file called `a.out`
+will be generated, or you can specify an output file as the second
+argument.
 
-Programmatic usage:
-```js
-var es5Source = require("regenerator")(es6Source);
-var es5SourceWithRuntime = require("regenerator")(es6Source, { includeRuntime: true });
-```
+$ ./bin/compile program.js <output-file>
+$ node <output-file>
 
-AST transformation:
-```js
-var recast = require("recast");
-var ast = recast.parse(es6Source);
-ast = require("regenerator").transform(ast);
-var es5Source = recast.print(ast);
-```
+There is also a browser editor included in the `browser` directory.
+Open `browser/index.html` to run it, and you will be able to
+interactively write code and set breakpoints.
 
-How can you get involved?
----
+## API
 
-The easiest way to get involved is to look for buggy examples using [the
-sandbox](http://facebook.github.io/regenerator/), and when you find
-something strange just click the "report a bug" link (the new issue form
-will be populated automatically with the problematic code).
+At the bottom of the generated file, you will see where the program is
+run by the virtual machine. This virtual machine does *not* interpret
+the code; the code is real native JavaScript. All the virtual machine
+does is check the behavior of the code and handle runtime information
+of continuations (such as frames).
 
-Alternatively, you can
-[fork](https://github.com/facebook/regenerator/fork) the repository,
-create some failing tests cases in [test/tests.es6.js](test/tests.es6.js),
-and send pull requests for me to fix.
+Some useful methods of the VM:
 
-If you're feeling especially brave, you are more than welcome to dive into
-the transformer code and fix the bug(s) yourself, but I must warn you that
-the code could really benefit from [better implementation
-comments](https://github.com/facebook/regenerator/issues/7).
+* toggleBreakpoint(line) - set/remove a breakpoint
+* continue() - resume execution
+* step() - step to the next expression
+* getTopFrame() - if paused, get the top frame
+* abort() - stop executing and clear out all state
+
+Events (subscribe to events with `vm.on`):
+
+* paused - fired when the code stops (breakpoint, stepped, etc)
+* error - fired when an uncaught error occurs
+* resumed - fired when the code resumed from being paused
+* finish - fired when the code completes
+* cont-invoked - fired when a continuation is invoked
+
+## Contributing
+
+I have turned off issues because I know there are many bugs in here
+and I do not have time to triage them. However, I welcome PRs that
+have a clear bugfix or purpose.
+
+Some things I would like to see:
+
+* Minor bugfixes and general stability improvements
+
+* Clean up `lib/visit.js` and break up the large functions
+
+* Remove so much manual AST construction. It would be great to give
+  something a string of code and generate the AST I need
+  automatically, but without having to parse the same code each time.
+
+* Introduce two compiler modes: debugger and continuations. If we
+  don't support the "debugger" mode which allows live breakpoints, we
+  can do further optimizations and don't need to convert every single
+  expression into the state machine. But I want this project to
+  continue to support breakpoints, so it would be nice if we could
+  have different compiler modes (or maybe optimization levels?)
+
+* Tests. Oh god help me, there are no tests.
+
+Some things I am going to reject:
+
+* Major refactorings without any discussion beforehand. I don't have
+  time to go through it.

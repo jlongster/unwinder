@@ -18,6 +18,6 @@ var finalSrc =
     "VM.execute($__global);"
 
 fs.writeFileSync(
-  'a.out',
+  process.argv[3] || 'a.out',
   finalSrc
 );

@@ -1,1 +1,0 @@
-/Users/james/projects/regenerator/node_modules/mocha/mocha.js
