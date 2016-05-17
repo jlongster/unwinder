@@ -13,3 +13,4 @@ VM.on("paused", function(e) {
 });
 
 VM.loadScript(process.argv[2]);
+console.log(VM.getOutput());

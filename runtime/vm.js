@@ -47,6 +47,7 @@ Machine.prototype.loadScript = function(path) {
 
   this.setDebugInfo(debugInfo);
   this.setCode(path, output.code);
+  this.run();
 };
 
 Machine.prototype.loadModule = function(path) {
@@ -141,6 +142,18 @@ Machine.prototype.run = function() {
   this.globalFn = rootFn;
 };
 
+Machine.prototype.abort = function() {
+  this.output = '';
+  this.globalFn = null;
+  this.state = IDLE;
+  this.running = false;
+  this.path = '';
+  this.code = '';
+  this.invokingContinuation = null;
+  this.capturingContinuation = false;
+  this.error = null;
+};
+
 Machine.prototype.getNextStepId = function(machineId, stepId, offset) {
   var locs = this.debugInfo.data.stepIds[machineId];
   var idx = locs.indexOf(stepId);
@@ -191,6 +204,8 @@ Machine.prototype.step = function() {
   }.bind(this);
 
   _step();
+
+  var top = this.getTopFrame();
   while(this.state === SUSPENDED && !this.getLocation()) {
     // Keep stepping until we hit something we know where we are
     // located
@@ -371,6 +386,8 @@ Machine.prototype.toggleBreakpoint = function(line) {
     this.hasBreakpoints = true;
     this.machineBreaks[pos.machineId][pos.locId] = true;
   }
+
+  // TODO: remove breakpoints...
 };
 
 Machine.prototype.callCC = function() {
@@ -389,7 +406,12 @@ Machine.prototype.onCapture = function() {
   top.state['$__t' + (top.tmpid - 1)] = function(arg) {
     top.next = next;
     top.state['$__t' + tmpid] = arg;
-    this.invokeContinuation(fnstack);
+    if(this.running) {
+      this.invokeContinuation(fnstack);
+    }
+    else {
+      this.onInvoke(fnstack);
+    }
   }.bind(this);
 
   this.restore();
@@ -402,7 +424,13 @@ Machine.prototype.invokeContinuation = function(fnstack) {
 
 Machine.prototype.onInvoke = function(fnstack) {
   this.stack = fnstack.map(function(x) { return x; });
-  this.restore();
+  this.fire('cont-invoked');
+
+  if(!this.stepping) {
+    this.running = true;
+    this.state = EXECUTING;
+    this.restore();
+  }
 }
 
 Machine.prototype.handleWatch = function(machineId, locId, res) {
@@ -594,9 +622,6 @@ Machine.prototype.dispatchException = function() {
 
   if(!prevStepping && dispatched) {
     this.restore();
-  }
-  
-  if(dispatched) {
     this.error = undefined;
   }
 
@@ -772,7 +797,10 @@ DebugInfo.prototype.lineToMachinePos = function(line) {
   if(!this.data) return null;
   var machines = this.data.machines;
 
-  for(var i=0, l=machines.length; i<l; i++) {
+  // Iterate over the machines backwards because they are ordered
+  // innermost to top-level, and we want to break on the outermost
+  // function.
+  for(var i=machines.length - 1; i >= 0; i--) {
     var locs = machines[i].locs;
     var keys = Object.keys(locs);
 

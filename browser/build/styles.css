@@ -372,3 +372,80 @@ span.CodeMirror-selectedtext { background: none; }
   text-decoration: underline;
   color: white !important;
 }
+
+.CodeMirror {
+  min-width: 100%;
+  height: 100%;
+  background-color: #f0f0f0;
+  max-height: 500px;
+}
+
+.CodeMirror .debug {
+  background-color: #404040;
+}
+
+.CodeMirror .expr-highlight {
+  background-color: #555555;
+  border: 1px solid #999999;
+}
+
+#paused { display: none }
+
+#buttons {
+  padding: 1em;
+  border-top: 1px solid #d0d0d0;
+}
+button { font-size: 15px; }
+
+.breakpoints {
+  width: 20px;
+  height: 100%;
+}
+
+.breakpoint {
+  background-color: red;
+  width: 12px;
+  height: 12px;
+  margin-left: 5px;
+  border-radius: 10px;
+}
+
+#output, #stack {
+  flex: 0 200px;
+  padding: 1em;
+  overflow: auto;
+}
+
+#output {
+  border-right: 1px solid #d0d0d0;
+}
+
+#actual-output {
+  white-space: pre;
+}
+
+#editor-area {
+  display: flex;
+}
+
+#editor {
+  flex: 1;
+}
+
+#editor-wrapper {
+  width: 100%;
+}
+
+h4 {
+  margin: 0;
+}
+
+#stack ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#template {
+  display: none;
+}

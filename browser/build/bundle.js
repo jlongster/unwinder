@@ -51,121 +51,247 @@
 	__webpack_require__(73);
 	__webpack_require__(74);
 	__webpack_require__(78);
+	__webpack_require__(80);
 
-	const defaultCode = `
-	function foo(x) {
-	  if(x <= 0) {
-	    return x;
-	  } else {
-	    return x + foo(x - 1);
+	var template = document.querySelector('#template').innerHTML;
+	window.debuggerDemo = {
+	  listeners: {},
+	  on: function(id, event, callback) {
+	    if(!this.listeners[event]) {
+	      this.listeners[event] = [];
+	    }
+	    this.listeners[event].push({ id, callback });
+	  },
+
+	  fire: function(event, id, vm) {
+	    if(this.listeners[event]) {
+	      this.listeners[event].forEach(l => {
+	        if(l.id === id) {
+	          l.callback(vm, id)
+	        }
+	      });
+	    }
 	  }
+	};
+
+	function initDebugger(node) {
+	  var code = node.textContent;
+	  var breakpoint = node.dataset.breakpoint;
+	  var id = node.id;
+
+	  if(!id) {
+	    throw new Error("debugger does not have an id");
+	  }
+
+	  var container = document.createElement('div');
+	  container.className = "debugger";
+	  container.innerHTML = template;
+	  node.parentNode.replaceChild(container, node);
+
+	  setTimeout(() => finishInit(code, breakpoint, container, id), 10);
+
 	}
 
-	console.log(foo(3));`;
+	function finishInit(code, breakpoint, container, id) {
+	  const pausedBtns = container.querySelector('#paused');
+	  const resumedBtns = container.querySelector('#resumed');
+	  const stackEl = container.querySelector('#actual-stack');
+	  const outputEl = container.querySelector('#actual-output');
 
-	const mirror = CodeMirror(document.querySelector('#editor'), {
-	  mode: 'javascript',
-	  theme: 'monokai',
-	  value: defaultCode.replace(/\t/g, ''),
-	  lineNumbers: true,
-	  gutters: ['breakpoints']
-	});
+	  const mirror = CodeMirror(container.querySelector('#editor'), {
+	    mode: 'javascript',
+	    theme: 'monokai',
+	    value: code,
+	    lineNumbers: true,
+	    gutters: ['breakpoints']
+	  });
 
-	const runBtn = document.querySelector('#run');
-	const pausedBtns = document.querySelector('#paused');
-	const stackEl = document.querySelector('#stack');
-	const outputEl = document.querySelector('#actual-output');
+	  const vm = new VM.$Machine();
+	  let currentPausedLoc = null;
+	  let currentExprHighlight = null;
+	  let breakpoints = [];
 
-	const vm = new VM.$Machine();
-	let currentPausedLoc = null;
-	let breakpoints = [];
-
-	function marker() {
-	  let marker = document.createElement("div");
-	  marker.className = "breakpoint";
-	  return marker;
-	}
-
-	mirror.on('gutterClick', (inst, line) => {
-	  line = line + 1;
-	  if(breakpoints.indexOf(line) === -1) {
+	  if(breakpoint) {
+	    const line = parseInt(breakpoint);
 	    breakpoints.push(line);
 	    mirror.setGutterMarker(line - 1, 'breakpoints', marker());
 	  }
-	  else {
-	    breakpoints = breakpoints.filter(l => l !== line);
-	    mirror.setGutterMarker(line - 1, 'breakpoints', null);
+
+	  function marker() {
+	    let marker = document.createElement("div");
+	    marker.className = "breakpoint";
+	    return marker;
 	  }
 
-	  if(vm.state === 'suspended') {
-	    vm.toggleBreakpoint(line);
-	  }
-	});
-
-	vm.on("error", function(e) {
-	  console.log('Error:', e, e.stack);
-	});
-
-	vm.on("paused", function(e) {
-	  currentPausedLoc = vm.getLocation();
-	  if(currentPausedLoc) {
-	    mirror.addLineClass(currentPausedLoc.start.line - 1, 'line', 'debug');
+	  function exprHighlight(width, charHeight) {
+	    let h = document.createElement("div");
+	    h.className = "expr-highlight";
+	    h.style.width = width + "px";
+	    h.style.height = charHeight + "px";
+	    // CodeMirror puts the widget *below* the line, but we actually
+	    // want it to cover the indicated line, so move it up a line
+	    h.style.marginTop = -charHeight + "px";
+	    return h;
 	  }
 
-	  updateUI();
-	});
+	  function removePauseState() {
+	    if(currentPausedLoc) {
+	      for(var i = currentPausedLoc.start.line; i <= currentPausedLoc.end.line; i++) {
+	        mirror.removeLineClass(i - 1, 'line', 'debug');
+	      }
+	      currentPausedLoc = null;
+	    }
 
-	vm.on("resumed", function() {
-	  mirror.removeLineClass(currentPausedLoc.start.line - 1, 'line', 'debug');
-	  currentPausedLoc = null;
+	    if(currentExprHighlight) {
+	      currentExprHighlight.parentNode.removeChild(currentExprHighlight);
+	      currentExprHighlight = null;
+	    }
 
-	  updateUI();
-	});
-
-	vm.on("finish", updateUI);
-
-	function updateUI() {
-	  if(currentPausedLoc) {
-	    runBtn.style.display = 'none';
-	    pausedBtns.style.display = 'block';
-	  }
-	  else {
-	    runBtn.style.display = 'block';
-	    pausedBtns.style.display = 'none';
+	    updateUI();
 	  }
 
-	  if(vm.stack) {
-	    stackEl.innerHTML = '<ul>' +
-	      vm.stack.map(frame => {
-	        return '<li>' + frame.name + '</li>';
-	      }).join('') +
-	      '</ul>';
-	  }
-	  else {
-	    stackEl.innerHTML = '';
-	  }
+	  mirror.on('gutterClick', (inst, line) => {
+	    line = line + 1;
+	    if(breakpoints.indexOf(line) === -1) {
+	      breakpoints.push(line);
+	      mirror.setGutterMarker(line - 1, 'breakpoints', marker());
+	    }
+	    else {
+	      breakpoints = breakpoints.filter(l => l !== line);
+	      mirror.setGutterMarker(line - 1, 'breakpoints', null);
+	    }
 
-	  outputEl.textContent = vm.getOutput();
-	}
-
-	document.querySelector('#step').addEventListener('click', function() {
-	  vm.step();
-	});
-
-	document.querySelector('#continue').addEventListener('click', function() {
-	  vm.continue();
-	});
-
-	runBtn.addEventListener('click', function() {
-	  const code = mirror.getValue();
-	  vm.loadString(mirror.getValue());
-
-	  breakpoints.forEach(line => {
-	    vm.toggleBreakpoint(line);
+	    if(vm.state === 'suspended') {
+	      vm.toggleBreakpoint(line);
+	    }
 	  });
 
-	  vm.run();
-	});
+	  mirror.on('beforeChange', () => {
+	    breakpoints.forEach(line => {
+	      mirror.setGutterMarker(line - 1, 'breakpoints', null);
+	    });
+	    breakpoints = [];
+
+	    vm.abort();
+	    removePauseState();
+	  });
+
+	  vm.on("error", function(e) {
+	    console.log('Error:', e, e.stack);
+	    debuggerDemo.fire("error", id, vm);
+	  });
+
+	  vm.on("paused", function(e) {
+	    currentPausedLoc = vm.getLocation();
+	    if(currentPausedLoc) {
+	      for(var i = currentPausedLoc.start.line; i <= currentPausedLoc.end.line; i++) {
+	        mirror.addLineClass(i - 1, 'line', 'debug');
+	      }
+
+	      if(currentExprHighlight) {
+	        currentExprHighlight.parentNode.removeChild(currentExprHighlight);
+	        currentExprHighlight = null;
+	      }
+
+	      if(currentPausedLoc.start.line === currentPausedLoc.end.line) {
+	        var width = currentPausedLoc.end.column - currentPausedLoc.start.column;
+	        currentExprHighlight = exprHighlight(mirror.defaultCharWidth() * width,
+	                                             mirror.defaultTextHeight())
+
+	        mirror.addWidget(
+	          { line: currentPausedLoc.start.line - 1,
+	            ch: currentPausedLoc.start.column },
+	          currentExprHighlight,
+	          false
+	        );
+	      }
+
+	      mirror.scrollIntoView(
+	        { from: { line: currentPausedLoc.start.line, ch: 0 },
+	          to: { line: currentPausedLoc.end.line, ch: 0 } },
+	        50
+	      );
+	    }
+
+	    updateUI();
+	    debuggerDemo.fire("paused", id, vm);
+	  });
+
+	  vm.on("resumed", function() {
+	    removePauseState();
+	    debuggerDemo.fire("resumed", id, vm);
+	  });
+
+	  vm.on("cont-invoked", function() {
+	    debuggerDemo.fire("cont-invoked", id, vm);
+	  });
+
+	  vm.on("finish", () => {
+	    updateUI();
+	    debuggerDemo.fire("finish", id, vm);
+	  });
+
+	  function updateUI() {
+	    if(currentPausedLoc) {
+	      resumedBtns.style.display = 'none';
+	      pausedBtns.style.display = 'block';
+	    }
+	    else {
+	      resumedBtns.style.display = 'block';
+	      pausedBtns.style.display = 'none';
+	    }
+
+	    if(vm.stack) {
+	      stackEl.innerHTML = '<ul>' +
+	        vm.stack.map(frame => {
+	          return '<li>' + frame.name + '</li>';
+	        }).join('') +
+	        '</ul>';
+	    }
+	    else {
+	      stackEl.innerHTML = '';
+	    }
+
+	    outputEl.textContent = vm.getOutput();
+	  }
+
+	  container.querySelector('#step').addEventListener('click', function() {
+	    vm.step();
+	  });
+
+	  container.querySelector('#continue').addEventListener('click', function() {
+	    vm.continue();
+	  });
+
+	  container.querySelector('#run').addEventListener('click', function() {
+	    vm.abort();
+
+	    const code = mirror.getValue();
+	    outputEl.textContent = '';
+	    vm.loadString(mirror.getValue());
+
+	    breakpoints.forEach(line => {
+	      vm.toggleBreakpoint(line);
+	    });
+
+	    vm.run();
+	  });
+
+	  container.querySelector('#run-no-breakpoints').addEventListener('click', function() {
+	    vm.abort();
+
+	    const code = mirror.getValue();
+	    outputEl.textContent = '';
+	    vm.loadString(mirror.getValue());
+
+	    vm.run();
+	  });
+	}
+
+	var debuggers = document.querySelectorAll(".debugger");
+	for(var i=0; i<debuggers.length; i++) {
+	  initDebugger(debuggers[i]);
+	}
 
 
 /***/ },
@@ -4211,6 +4337,8 @@
 	}
 
 	function visitNode(node, scope, debugInfo) {
+	  // Boxed variables need to access the box instead of used directly
+	  // (foo => foo[0])
 	  if(n.Identifier.check(node) &&
 	     (!n.VariableDeclarator.check(this.parent.node) ||
 	      this.parent.node.id !== node) &&
@@ -4232,8 +4360,14 @@
 	  if (node.expression) {
 	    // Transform expression lambdas into normal functions.
 	    node.expression = false;
+	    // This feels very dirty, is it ok to change the type like this?
+	    // We need to output a function that we can name so it can be
+	    // captured.
+	    // TODO: properly compile out arrow functions
+	    node.type = 'FunctionExpression';
 	    node.body = b.blockStatement([
-	      b.returnStatement(node.body)
+	      withLoc(b.returnStatement(node.body),
+	              node.body.loc)
 	    ]);
 	  }
 
@@ -4891,7 +5025,7 @@
 
 	  if(!internal) {
 	    if(!node.loc) {
-	      throw new Error("source location missing");
+	      throw new Error("source location missing: " + JSON.stringify(node));
 	    }
 	    else {
 	      this.debugInfo.addSourceLocation(this.debugId,
@@ -5551,6 +5685,9 @@
 	      tmp,
 	      this.explodeExpression(arg)
 	    );
+	    // TODO: breaking here allowing stepping to stop on return.
+	    // Not sure if that's desirable or not.
+	    // self.emit(b.breakStatement(), true);
 	    self.mark(after);
 	    self.releaseTempVar();
 
@@ -5620,7 +5757,7 @@
 	        // associated try block normally, so we won't have called
 	        // context.popCatch yet.  Call it here instead.
 	        self.popCatch(catchEntry, handler.loc);
-	        self.markAndBreak();
+	        // self.markAndBreak();
 
 	        var bodyPath = path.get("handler", "body");
 	        var safeParam = self.getTempVar();
@@ -5668,9 +5805,9 @@
 	    break;
 
 	  case "ThrowStatement":
-	    self.emit(b.throwStatement(
+	    self.emit(withLoc(b.throwStatement(
 	      self.explodeExpression(path.get("argument"))
-	    ), path.node.loc);
+	    ), path.node.loc));
 
 	    break;
 
@@ -5851,7 +5988,7 @@
 	    return finish(withLoc(b.memberExpression(
 	      self.explodeExpression(path.get("object")),
 	      expr.computed
-	        ? explodeViaTempVar(null, path.get("property"))
+	        ? explodeViaTempVar(null, path.get("property"), false, true)
 	        : expr.property,
 	      expr.computed
 	    ), path.node.loc));
@@ -5863,12 +6000,12 @@
 	    if(oldCalleePath.node.type === "Identifier" &&
 	       oldCalleePath.node.name === "callCC") {
 	      callArgs = [new types.NodePath(
-	        b.callExpression(
-	          b.memberExpression(b.identifier('VM'),
-	                             b.identifier('callCC'),
+	        withLoc(b.callExpression(
+	          b.memberExpression(b.identifier("VM"),
+	                             b.identifier("callCC"),
 	                             false),
 	          []
-	        )
+	        ), oldCalleePath.node.loc)
 	      )];
 	      oldCalleePath = path.get("arguments").get(0);
 	    }
@@ -5999,7 +6136,7 @@
 	      !!expr.prefix
 	    ), path.node.loc));
 
-	    case "BinaryExpression":
+	  case "BinaryExpression":
 	    return self.withTempVars(function() {
 	      return finish(withLoc(b.binaryExpression(
 	        expr.operator,
@@ -6049,13 +6186,8 @@
 	    // return self.contextProperty("sent");
 
 	  case "Identifier":
-	    if(expr.name === 'callCC') {
-	      expr = b.memberExpression(b.identifier('VM'),
-	                                b.identifier('callCC'),
-	                                false);
-	    }
-	    // Fallthrough
 	  case "FunctionExpression":
+	  case "ArrowFunctionExpression":
 	  case "ThisExpression":
 	  case "Literal":
 	    return finish(expr);
@@ -31110,6 +31242,7 @@
 
 	  this.setDebugInfo(debugInfo);
 	  this.setCode(path, output.code);
+	  this.run();
 	};
 
 	Machine.prototype.loadModule = function(path) {
@@ -31204,6 +31337,18 @@
 	  this.globalFn = rootFn;
 	};
 
+	Machine.prototype.abort = function() {
+	  this.output = '';
+	  this.globalFn = null;
+	  this.state = IDLE;
+	  this.running = false;
+	  this.path = '';
+	  this.code = '';
+	  this.invokingContinuation = null;
+	  this.capturingContinuation = false;
+	  this.error = null;
+	};
+
 	Machine.prototype.getNextStepId = function(machineId, stepId, offset) {
 	  var locs = this.debugInfo.data.stepIds[machineId];
 	  var idx = locs.indexOf(stepId);
@@ -31254,6 +31399,8 @@
 	  }.bind(this);
 
 	  _step();
+
+	  var top = this.getTopFrame();
 	  while(this.state === SUSPENDED && !this.getLocation()) {
 	    // Keep stepping until we hit something we know where we are
 	    // located
@@ -31434,6 +31581,8 @@
 	    this.hasBreakpoints = true;
 	    this.machineBreaks[pos.machineId][pos.locId] = true;
 	  }
+
+	  // TODO: remove breakpoints...
 	};
 
 	Machine.prototype.callCC = function() {
@@ -31452,7 +31601,12 @@
 	  top.state['$__t' + (top.tmpid - 1)] = function(arg) {
 	    top.next = next;
 	    top.state['$__t' + tmpid] = arg;
-	    this.invokeContinuation(fnstack);
+	    if(this.running) {
+	      this.invokeContinuation(fnstack);
+	    }
+	    else {
+	      this.onInvoke(fnstack);
+	    }
 	  }.bind(this);
 
 	  this.restore();
@@ -31465,7 +31619,13 @@
 
 	Machine.prototype.onInvoke = function(fnstack) {
 	  this.stack = fnstack.map(function(x) { return x; });
-	  this.restore();
+	  this.fire('cont-invoked');
+
+	  if(!this.stepping) {
+	    this.running = true;
+	    this.state = EXECUTING;
+	    this.restore();
+	  }
 	}
 
 	Machine.prototype.handleWatch = function(machineId, locId, res) {
@@ -31657,9 +31817,6 @@
 
 	  if(!prevStepping && dispatched) {
 	    this.restore();
-	  }
-	  
-	  if(dispatched) {
 	    this.error = undefined;
 	  }
 
@@ -31835,7 +31992,10 @@
 	  if(!this.data) return null;
 	  var machines = this.data.machines;
 
-	  for(var i=0, l=machines.length; i<l; i++) {
+	  // Iterate over the machines backwards because they are ordered
+	  // innermost to top-level, and we want to break on the outermost
+	  // function.
+	  for(var i=machines.length - 1; i >= 0; i--) {
 	    var locs = machines[i].locs;
 	    var keys = Object.keys(locs);
 
@@ -41580,6 +41740,13 @@
 /* 76 */,
 /* 77 */,
 /* 78 */
+/***/ function(module, exports) {
+
+	// removed by extract-text-webpack-plugin
+
+/***/ },
+/* 79 */,
+/* 80 */
 /***/ function(module, exports) {
 
 	// removed by extract-text-webpack-plugin
