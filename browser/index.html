@@ -7,8 +7,26 @@
       html, body {
       margin: 0;
       body: 0;
+      padding: 1em;
       }
-    </style>
+
+      .CodeMirror {
+      height: 500px;
+      }
+
+      .debugger {
+      border: 1px solid #d0d0d0;
+      }
+
+      .figure-label {
+      text-align: center;
+      line-height: 1.5em;
+      font-style: italic;
+      width: 500px;
+      margin: 0 auto;
+      margin-top: 1em;
+      }
+</style>
   </head>
   <body>
     <div id="template">
@@ -42,7 +60,10 @@ function foo(func) {
 }
 
 console.log(foo(function() { return 4 }));
-</div>
+    </div>
+    <div class="figure-label">
+      Click on any line to set a breakpoint.
+    </div>
     <script src="build/bundle.js"></script>
   </body>
 </html>

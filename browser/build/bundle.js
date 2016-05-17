@@ -5289,43 +5289,6 @@
 	          b.throwStatement(
 	            b.newExpression(b.identifier('$ContinuationExc'), [])
 	          )
-	        ),
-
-	        b.ifStatement(
-	          b.logicalExpression(
-	            '&&',
-	            self.vmProperty('hasWatches'),
-	            b.binaryExpression(
-	              '!==',
-	              self.getProperty(
-	                self.getProperty(self.vmProperty('machineWatches'),
-	                                 b.literal(this.debugId),
-	                                 true),
-	                b.identifier('$__next'),
-	                true
-	              ),
-	              // is identifier right here? it doesn't seem right
-	              b.identifier('undefined')
-	            )
-	          ),
-	          b.expressionStatement(
-	            b.callExpression(self.vmProperty('handleWatch'), [
-	              b.literal(this.debugId),
-	              b.identifier('$__next'),
-	              b.callExpression(b.identifier('eval'), [
-	                self.getProperty(
-	                  self.getProperty(
-	                    self.getProperty(self.vmProperty('machineWatches'),
-	                                     b.literal(this.debugId),
-	                                     true),
-	                    b.identifier('$__next'),
-	                    true
-	                  ),
-	                  'src'
-	                )
-	              ])
-	            ])
-	          )
 	        )
 	      ])
 	    )
@@ -31579,10 +31542,13 @@
 
 	  if(pos) {
 	    this.hasBreakpoints = true;
-	    this.machineBreaks[pos.machineId][pos.locId] = true;
+	    if(this.machineBreaks[pos.machineId][pos.locId]) {
+	      this.machineBreaks[pos.machineId][pos.locId] = false;
+	    }
+	    else {
+	      this.machineBreaks[pos.machineId][pos.locId] = true;
+	    }
 	  }
-
-	  // TODO: remove breakpoints...
 	};
 
 	Machine.prototype.callCC = function() {
