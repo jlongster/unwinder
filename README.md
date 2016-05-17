@@ -5,6 +5,9 @@ An implementation of continuations in JavaScript. Includes built-in
 support for breakpoints (implemented with continuations) and setting
 breakpoints like on running scripts.
 
+See [this post](http://jlongster.com/Whats-in-a-Continuation) for a
+deeper explanation and interactive tutorials.
+
 This implements the paper "[Exceptional Continuations in
 JavaScript](http://www.schemeworkshop.org/2007/procPaper4.pdf)". It
 started as a fork of
