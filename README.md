@@ -43,7 +43,24 @@ There is also a browser editor included in the `browser` directory.
 Open `browser/index.html` to run it, and you will be able to
 interactively write code and set breakpoints.
 
-## API
+## Continuation API
+
+Use `callCC` to capture the current continuation. It will be given to
+you as a function that never returns.
+
+```js
+function foo() {
+  var cont = callCC(cont => cont);
+  if(typeof cont === "function") {
+    cont(5);
+  }
+  return cont;
+}
+
+console.log(foo()); // -> 5
+```
+
+## Machine API
 
 At the bottom of the generated file, you will see where the program is
 run by the virtual machine. This virtual machine does *not* interpret
