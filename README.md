@@ -48,19 +48,19 @@ of continuations (such as frames).
 
 Some useful methods of the VM:
 
-* toggleBreakpoint(line) - set/remove a breakpoint
-* continue() - resume execution
-* step() - step to the next expression
-* getTopFrame() - if paused, get the top frame
-* abort() - stop executing and clear out all state
+* **toggleBreakpoint(line)** - set/remove a breakpoint
+* **continue()** - resume execution
+* **step()** - step to the next expression
+* **getTopFrame()** - if paused, get the top frame
+* **abort()** - stop executing and clear out all state
 
 Events (subscribe to events with `vm.on`):
 
-* paused - fired when the code stops (breakpoint, stepped, etc)
-* error - fired when an uncaught error occurs
-* resumed - fired when the code resumed from being paused
-* finish - fired when the code completes
-* cont-invoked - fired when a continuation is invoked
+* **paused** - fired when the code stops (breakpoint, stepped, etc)
+* **error** - fired when an uncaught error occurs
+* **resumed** - fired when the code resumed from being paused
+* **finish** - fired when the code completes
+* **cont-invoked** - fired when a continuation is invoked
 
 ## Contributing
 
