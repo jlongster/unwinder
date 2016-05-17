@@ -40,6 +40,8 @@ button { font-size: 15px; }
   flex: 0 200px;
   padding: 1em;
   overflow: auto;
+  max-height: 500px;
+  box-sizing: border-box;
 }
 
 #output {

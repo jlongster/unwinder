@@ -26,7 +26,19 @@
       margin: 0 auto;
       margin-top: 1em;
       }
-</style>
+
+      #debugger-error {
+      background-color: #ff5555;
+      font-family: sans-serif;
+      padding: .25em .5em;
+      line-height: 1.5em;
+      margin: 1em;
+      position: fixed;
+      top: 0;
+      right: 0;
+      display: none
+      }
+    </style>
   </head>
   <body>
     <div id="template">
@@ -64,6 +76,7 @@ console.log(foo(function() { return 4 }));
     <div class="figure-label">
       Click on any line to set a breakpoint.
     </div>
+    <div id="debugger-error">Hi</div>
     <script src="build/bundle.js"></script>
   </body>
 </html>

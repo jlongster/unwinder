@@ -56,23 +56,39 @@
 	var template = document.querySelector('#template').innerHTML;
 	window.debuggerDemo = {
 	  listeners: {},
-	  on: function(id, event, callback) {
+	  on: function(event, callback) {
 	    if(!this.listeners[event]) {
 	      this.listeners[event] = [];
 	    }
-	    this.listeners[event].push({ id, callback });
+	    this.listeners[event].push(callback);
 	  },
 
-	  fire: function(event, id, vm) {
+	  fire: function(event, vm, arg) {
 	    if(this.listeners[event]) {
-	      this.listeners[event].forEach(l => {
-	        if(l.id === id) {
-	          l.callback(vm, id)
-	        }
+	      this.listeners[event].forEach(cb => {
+	        cb(vm, arg)
 	      });
 	    }
 	  }
 	};
+
+	var errorTimer;
+	function showError(e) {
+	  var errorNode = document.querySelector("#debugger-error");
+
+	  if(errorNode) {
+	    errorNode.textContent = 'Error: ' +  e.message;
+	    errorNode.style.display = "block";
+
+	    if(errorTimer) {
+	      clearTimeout(errorTimer);
+	    }
+
+	    errorTimer = setTimeout(function() {
+	      errorNode.style.display = 'none';
+	    }, 5000);
+	  }
+	}
 
 	function initDebugger(node) {
 	  var code = node.textContent;
@@ -88,8 +104,8 @@
 	  container.innerHTML = template;
 	  node.parentNode.replaceChild(container, node);
 
+	  // Don't judge me
 	  setTimeout(() => finishInit(code, breakpoint, container, id), 10);
-
 	}
 
 	function finishInit(code, breakpoint, container, id) {
@@ -178,7 +194,7 @@
 
 	  vm.on("error", function(e) {
 	    console.log('Error:', e, e.stack);
-	    debuggerDemo.fire("error", id, vm);
+	    showError(e);
 	  });
 
 	  vm.on("paused", function(e) {
@@ -214,21 +230,17 @@
 	    }
 
 	    updateUI();
-	    debuggerDemo.fire("paused", id, vm);
 	  });
 
 	  vm.on("resumed", function() {
 	    removePauseState();
-	    debuggerDemo.fire("resumed", id, vm);
 	  });
 
-	  vm.on("cont-invoked", function() {
-	    debuggerDemo.fire("cont-invoked", id, vm);
-	  });
+	  // vm.on("cont-invoked", function() {
+	  // });
 
 	  vm.on("finish", () => {
 	    updateUI();
-	    debuggerDemo.fire("finish", id, vm);
 	  });
 
 	  function updateUI() {
@@ -268,7 +280,13 @@
 
 	    const code = mirror.getValue();
 	    outputEl.textContent = '';
-	    vm.loadString(mirror.getValue());
+	    try {
+	      vm.loadString(mirror.getValue());
+	    }
+	    catch(e) {
+	      debuggerDemo.fire("error", vm, e);
+	      showError(e);
+	    }
 
 	    breakpoints.forEach(line => {
 	      vm.toggleBreakpoint(line);
