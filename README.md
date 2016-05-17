@@ -3,7 +3,7 @@
 
 An implementation of continuations in JavaScript. Includes built-in
 support for breakpoints (implemented with continuations) and setting
-breakpoints like on running scripts.
+breakpoints on running scripts.
 
 See [this post](http://jlongster.com/Whats-in-a-Continuation) for a
 deeper explanation and interactive tutorials.
