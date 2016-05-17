@@ -101,6 +101,7 @@
 
 	  var container = document.createElement('div');
 	  container.className = "debugger";
+	  container.id = id;
 	  container.innerHTML = template;
 	  node.parentNode.replaceChild(container, node);
 
@@ -131,6 +132,15 @@
 	    const line = parseInt(breakpoint);
 	    breakpoints.push(line);
 	    mirror.setGutterMarker(line - 1, 'breakpoints', marker());
+	  }
+
+	  function fixHeight() {
+	    // Damn Chrome's flexbox implementation that forces us to do this.
+	    var n = document.querySelector('#' + id + ' .CodeMirror');
+	    var rect = n.getBoundingClientRect();
+	    if(rect.height > 500) {
+	      n.style.height = '500px';
+	    }
 	  }
 
 	  function marker() {
@@ -191,6 +201,8 @@
 	    vm.abort();
 	    removePauseState();
 	  });
+
+	  mirror.on('change', fixHeight);
 
 	  vm.on("error", function(e) {
 	    console.log('Error:', e, e.stack);
@@ -304,6 +316,8 @@
 
 	    vm.run();
 	  });
+
+	  fixHeight();
 	}
 
 	var debuggers = document.querySelectorAll(".debugger");
