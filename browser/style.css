@@ -77,3 +77,15 @@ h4 {
 #template {
   display: none;
 }
+
+#buttons {
+  overflow: hidden;
+}
+
+#resumed, #paused {
+  float: left;
+}
+
+#shared {
+  float: right;
+}

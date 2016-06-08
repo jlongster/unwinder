@@ -77,7 +77,7 @@
 	  var errorNode = document.querySelector("#debugger-error");
 
 	  if(errorNode) {
-	    errorNode.textContent = 'Error: ' +  e.message;
+	    errorNode.textContent = 'Error: ' +  (e.message ? e.message : e);
 	    errorNode.style.display = "block";
 
 	    if(errorTimer) {
@@ -90,8 +90,8 @@
 	  }
 	}
 
-	function initDebugger(node) {
-	  var code = node.textContent;
+	function initDebugger(node, code) {
+	  var code = code || node.textContent;
 	  var breakpoint = node.dataset.breakpoint;
 	  var id = node.id;
 
@@ -107,6 +107,8 @@
 
 	  // Don't judge me
 	  setTimeout(() => finishInit(code, breakpoint, container, id), 10);
+
+	  return container;
 	}
 
 	function finishInit(code, breakpoint, container, id) {
@@ -207,6 +209,7 @@
 	  vm.on("error", function(e) {
 	    console.log('Error:', e, e.stack);
 	    showError(e);
+	    updateUI();
 	  });
 
 	  vm.on("paused", function(e) {
@@ -320,9 +323,27 @@
 	  fixHeight();
 	}
 
-	var debuggers = document.querySelectorAll(".debugger");
-	for(var i=0; i<debuggers.length; i++) {
-	  initDebugger(debuggers[i]);
+	var codeMatch = window.location.href.match(/\?code=(.*)/);
+	if(codeMatch) {
+	  var code = codeMatch[1];
+	  var container = initDebugger(
+	    document.querySelector("#demo-debugger"),
+	    atob(code)
+	  );
+
+	  var shareBtn = container.querySelector("#share");
+	  console.log(shareBtn);
+	  shareBtn.addEventListener("click", function() {
+	    var mirror = document.querySelector(".CodeMirror").CodeMirror;
+	    var loc = window.location.href.replace(/\?code.*/, '');
+	    history.pushState(null, null, loc + '?code=' + btoa(mirror.getValue()));
+	  });
+	}
+	else {
+	  var debuggers = document.querySelectorAll(".debugger");
+	  for(var i=0; i<debuggers.length; i++) {
+	    initDebugger(debuggers[i]);
+	  }
 	}
 
 
