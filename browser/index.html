@@ -70,11 +70,53 @@
     </div>
 
     <div id="demo-debugger">
-function foo(func) {
-  return func();
+// Example: implementation of try/catch
+
+var tryStack = [];
+
+function Try(body, handler) {
+  var ret = callCC(function(cont) {
+    tryStack.push(cont);
+    return body();
+  });
+  tryStack.pop();
+
+  if(ret.__exc) {
+    return handler(ret.__exc);
+  }
+  return ret;
 }
 
-console.log(foo(function() { return 4 }));
+function Throw(exc) {
+  if(tryStack.length > 0) {
+    tryStack[tryStack.length - 1]({ __exc: exc });
+  }
+  throw exc;
+}
+
+// Usage
+
+function times2(x) {
+  console.log('x is', x);
+  if(x < 0) {
+    Throw(new Error("error!"));
+  }
+  return x * 2;
+}
+
+function main(x) {
+  return times2(x);
+}
+
+Try(
+  function() {
+    console.log(main(1));
+    console.log(main(-1));
+  },
+  function(ex) {
+    console.log("caught", ex);
+  }
+);
     </div>
     <div class="figure-label">
       Click on any line to set a breakpoint.

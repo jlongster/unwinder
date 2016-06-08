@@ -323,13 +323,11 @@
 	  fixHeight();
 	}
 
-	var codeMatch = window.location.href.match(/\?code=(.*)/);
-	if(codeMatch) {
-	  var code = codeMatch[1];
-	  var container = initDebugger(
-	    document.querySelector("#demo-debugger"),
-	    atob(code)
-	  );
+	var demoDebugger = document.querySelector("#demo-debugger");
+	if(demoDebugger) {
+	  var codeMatch = window.location.href.match(/\?code=(.*)/);
+	  var code = codeMatch ? codeMatch[1] : "";
+	  var container = initDebugger(demoDebugger, atob(code));
 
 	  var shareBtn = container.querySelector("#share");
 	  console.log(shareBtn);
