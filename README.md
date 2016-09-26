@@ -60,6 +60,8 @@ function foo() {
 console.log(foo()); // -> 5
 ```
 
+See [this post](http://jlongster.com/Exploring-Continuations-Resumable-Exceptions) for more interesting examples, including resumable exceptions.
+
 ## Machine API
 
 At the bottom of the generated file, you will see where the program is
