@@ -25,31 +25,34 @@
   "main": "main.js",
   "bin": "bin/regenerator",
   "scripts": {
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "build": "webpack"
   },
   "dependencies": {
-    "ast-types": "~0.3.16",
-    "commander": "~2.1.0",
-    "css-loader": "^0.23.1",
-    "defs": "~0.6.2",
-    "escope": "~1.0.1",
-    "esprima": "git://github.com/ariya/esprima.git#harmony",
-    "estraverse": "~1.5.0",
-    "extract-text-webpack-plugin": "^1.0.1",
+    "@sweet-js/core": "^3.0.13",
+    "ast-types": "^0.3.38",
+    "codemirror": "^5.39.2",
+    "commander": "^2.17.1",
+    "css-loader": "^1.0.0",
+    "defs": "^1.1.1",
+    "escope": "^3.6.0",
+    "esprima": "^4.0.1",
+    "estraverse": "^1.9.3",
     "noop": "^0.2.2",
     "private": "~0.1.2",
-    "recast": "~0.5.7",
-    "style-loader": "^0.13.1",
-    "sweet.js": "^1.0.3",
-    "webpack": "^1.13.0"
+    "recast": "^0.15.3",
+    "style-loader": "^0.22.1"
   },
   "devDependencies": {
-    "mocha": "~1.13.0",
-    "semver": "~2.1.0",
-    "expect": "0.0.2"
+    "expect": "0.0.2",
+    "mocha": "^5.2.0",
+    "semver": "^5.5.0",
+    "webpack": "^4.16.5",
+    "extract-text-webpack-plugin": "^4.0.0-beta.0",
+    "webpack-cli": "^3.1.0"
   },
   "license": "BSD",
   "engines": {
-    "node": ">= 0.6"
+    "node": ">= 6.0"
   }
 }

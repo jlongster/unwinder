@@ -15,14 +15,9 @@ var b = types.builders;
 var transform = require("./lib/visit").transform;
 var utils = require("./lib/util");
 var recast = require("recast");
-var esprimaHarmony = require("esprima");
+var esprima = require("esprima");
 var genFunExp = /\bfunction\s*\*/;
 var blockBindingExp = /\b(let|const)\s+/;
-
-assert.ok(
-  /harmony/.test(esprimaHarmony.version),
-  "Bad esprima version: " + esprimaHarmony.version
-);
 
 function regenerator(source, options) {
   options = utils.defaults(options || {}, {
@@ -40,7 +35,7 @@ function regenerator(source, options) {
     tabWidth: utils.guessTabWidth(source),
     // Use the harmony branch of Esprima that installs with regenerator
     // instead of the master branch that recast provides.
-    esprima: esprimaHarmony,
+    esprima: esprima,
     range: supportBlockBinding,
       loc: true
   };
