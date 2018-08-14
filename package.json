@@ -1,6 +1,6 @@
 {
   "author": "Ben Newman <bn@cs.stanford.edu>",
-  "name": "regenerator",
+  "name": "unwinder",
   "description": "Source transformer enabling ECMAScript 6 generator functions (yield) in JavaScript-of-today (ES5)",
   "keywords": [
     "generator",
@@ -17,10 +17,10 @@
     "ES6"
   ],
   "version": "0.3.2",
-  "homepage": "http://github.com/facebook/regenerator",
+  "homepage": "http://github.com/jlongster/unwinder",
   "repository": {
     "type": "git",
-    "url": "git://github.com/facebook/regenerator.git"
+    "url": "git://github.com/jlongster/unwinder.git"
   },
   "main": "main.js",
   "bin": "bin/regenerator",
