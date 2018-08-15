@@ -2,10 +2,11 @@
 
 var fs = require('fs');
 var compiler = require(__dirname + '/../main');
-var sweet = require('sweet.js');
+var sweet = require('@sweet-js/core');
+var NodeLoader = require('@sweet-js/core/dist/node-loader').default;
 
 var src = fs.readFileSync(process.argv[2], "utf-8");
-src = sweet.compile(src, { noBabel: true }).code;
+src = sweet.compile(src, new NodeLoader(__dirname), { noBabel: true }).code;
 var output = compiler(src, { includeDebug: true });
 var finalSrc =
     "var $Machine = require('./runtime/vm.js').$Machine;\n" +
